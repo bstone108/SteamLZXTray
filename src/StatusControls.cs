@@ -81,8 +81,8 @@ internal static class ListViewMetrics
     {
         if (lv.IsHandleCreated && lv.Items.Count > 0)
         {
-            int h = lv.GetItemRect(0).Height;
-            if (h > 0) return h;
+            // GetItemRect throws if the native item doesn't exist yet; fall back to font metrics then.
+            try { int h = lv.GetItemRect(0).Height; if (h > 0) return h; } catch (ArgumentException) { }
         }
         return lv.Font.Height + lv.LogicalToDeviceUnits(4);
     }

@@ -24,7 +24,8 @@ internal sealed class MainForm : Form
     private readonly Button _btnClearSkip = new() { Text = "Clear skip list", AutoSize = true };
     private readonly Button _btnResetLog = new() { Text = "Reset game log", AutoSize = true };
     private readonly Button _btnRescan = new() { Text = "Rescan libraries", AutoSize = true };
-    private readonly ListView _libs = new() { View = View.Details, FullRowSelect = true, GridLines = true, Anchor = AnchorStyles.Left | AnchorStyles.Right | AnchorStyles.Top, Scrollable = true, ShowItemToolTips = true };
+    private readonly ListView _libs = new() { View = View.Details, FullRowSelect = true, GridLines = true, Anchor = AnchorStyles.Left | AnchorStyles.Right | AnchorStyles.Top };
+    private const int MaxLibraryRows = 5;
     private readonly TextBox _log = new() { Multiline = true, ReadOnly = true, ScrollBars = ScrollBars.Both, WordWrap = false, Dock = DockStyle.Fill, Font = new Font(FontFamily.GenericMonospace, 8.5f) };
 
     // settings
@@ -130,14 +131,12 @@ internal sealed class MainForm : Form
         };
 
         _engine.LibrariesChanged += () => { if (IsHandleCreated) BeginInvoke(new Action(RefreshLibraries)); };
-        _libs.Resize += (_, _) => FitLibraryColumns();
-        _libs.HandleCreated += (_, _) => FitLibraryList();
-        DpiChanged += (_, _) => BeginInvoke(new Action(() => { ApplyDpiSizes(); FitLibraryList(); }));
+        DpiChanged += (_, _) => { ApplyDpiSizes(); _lastLibRows = -1; QueueFitLibraryList(); };
         ApplyDpiSizes();
         _timer.Tick += (_, _) => RefreshStatus();
         VisibleChanged += (_, _) =>
         {
-            if (Visible) { LoadSettingsToUi(); RefreshLibraries(); RefreshStatus(); _lastLibRows = -1; FitLibraryList(); _timer.Start(); }
+            if (Visible) { LoadSettingsToUi(); _lastLibRows = -1; RefreshLibraries(); RefreshStatus(); _timer.Start(); }
             else _timer.Stop();
         };
     }
@@ -185,10 +184,12 @@ internal sealed class MainForm : Form
 
         var libsLabel = new Label { Text = "Libraries and folders", AutoSize = true, Font = new Font(Font, FontStyle.Bold), Margin = new Padding(3, 4, 3, 2) };
 
-        _libs.Columns.Add("Type");
-        _libs.Columns.Add("Path");
-        _libs.Columns.Add("FS");
-        _libs.Columns.Add("Status");
+        _libs.Columns.Add("Type", 70);
+        _libs.Columns.Add("Path", 330);
+        _libs.Columns.Add("FS", 60);
+        _libs.Columns.Add("Status", 230);
+        _libs.Columns.Add("Games / folders", 110);
+        _libs.Columns.Add("Compressed", 90);
         _libs.Margin = new Padding(3, 0, 3, 3);
 
         // Outer layout: everything auto-sized from the top; a filler row takes leftover space.
@@ -214,32 +215,22 @@ internal sealed class MainForm : Form
         MinimumSize = new Size(S(520), S(400));
     }
 
-    /// <summary>List height = header + rows (1..10) + border; scrollbar only beyond 10. Then fit the window height.</summary>
+    /// <summary>
+    /// List height = header + rows (1..5) + border (+ horizontal scrollbar if the columns are wider than the list);
+    /// a vertical scrollbar appears beyond 5 rows. Then fit the window height.
+    /// Only called once the list's handle exists and its items are in place (never from HandleCreated:
+    /// querying item rectangles there throws and aborts ListView's own column/item setup).
+    /// </summary>
     private void FitLibraryList()
     {
-        int rows = Math.Clamp(_libs.Items.Count, 1, 10);
-        FitLibraryColumns(); // Path column fills the width, so there is no horizontal scrollbar to account for
-        int border = _libs.IsHandleCreated ? Math.Max(0, _libs.Height - _libs.ClientSize.Height) : SystemInformation.Border3DSize.Height * 2;
-        int h = ListViewMetrics.HeaderHeight(_libs) + rows * ListViewMetrics.RowHeight(_libs) + border + 1;
+        int rows = Math.Clamp(_libs.Items.Count, 1, MaxLibraryRows);
+        int border = LogicalToDeviceUnits(2) * 2; // Fixed3D frame, top + bottom (independent of scrollbars)
+        int vScroll = _libs.Items.Count > MaxLibraryRows ? SystemInformation.VerticalScrollBarWidth : 0;
+        int colsWidth = _libs.Columns.Cast<ColumnHeader>().Sum(c => c.Width);
+        int hScroll = colsWidth > _libs.Width - border - vScroll ? SystemInformation.HorizontalScrollBarHeight : 0;
+        int h = ListViewMetrics.HeaderHeight(_libs) + rows * ListViewMetrics.RowHeight(_libs) + border + hScroll + 1;
         if (_libs.Height != h) _libs.Height = h;
-        FitLibraryColumns(); // vertical scrollbar (>10 rows) changes the client width
         if (rows != _lastLibRows) { _lastLibRows = rows; FitWindowHeight(); }
-    }
-
-    /// <summary>Type/FS/Status sized to content; Path takes the remaining width (no horizontal scrollbar).</summary>
-    private void FitLibraryColumns()
-    {
-        if (_libs.Columns.Count < 4) return;
-        int pad = LogicalToDeviceUnits(14);
-        int W(string t) => TextRenderer.MeasureText(t, _libs.Font).Width + pad;
-        var items = _libs.Items.Cast<ListViewItem>().ToList();
-        int type = Math.Max(W("Custom"), W("Type"));
-        int fs = Math.Max(W("NTFS"), items.Select(i => W(i.SubItems[2].Text)).DefaultIfEmpty(0).Max());
-        int status = Math.Min(LogicalToDeviceUnits(260), Math.Max(W("Status"), items.Select(i => W(i.SubItems[3].Text)).DefaultIfEmpty(0).Max()));
-        int path = Math.Max(LogicalToDeviceUnits(120), _libs.ClientSize.Width - type - fs - status - 1);
-        _libs.BeginUpdate();
-        _libs.Columns[0].Width = type; _libs.Columns[1].Width = path; _libs.Columns[2].Width = fs; _libs.Columns[3].Width = status;
-        _libs.EndUpdate();
     }
 
     /// <summary>Make the window tall enough for the whole Status tab (within the screen's working area).</summary>
@@ -396,12 +387,25 @@ internal sealed class MainForm : Form
                 l.Path,
                 l.FileSystem,
                 l.Supported ? $"OK ({l.UnitCount} units, {l.CompletedCount} done)" : "Skipped: " + l.Status,
-            }) { ToolTipText = l.Path + Environment.NewLine + (l.Supported ? $"{l.CompletedCount} of {l.UnitCount} done" : l.Status) };
-            if (!l.Supported) it.ForeColor = SystemColors.GrayText;
+                l.Supported ? l.UnitCount.ToString() : "-",
+                l.Supported ? $"{l.CompletedCount}/{l.UnitCount}" : "-",
+            });
+            if (!l.Supported) it.ForeColor = Color.Gray;
             _libs.Items.Add(it);
         }
         _libs.EndUpdate();
-        FitLibraryList();
+        QueueFitLibraryList();
+    }
+
+    /// <summary>Refit after the current layout pass, once the list's handle and items are real.</summary>
+    private void QueueFitLibraryList()
+    {
+        if (!IsHandleCreated) return;
+        BeginInvoke(new Action(() =>
+        {
+            try { FitLibraryList(); }
+            catch (Exception ex) { Log.Write("Library list sizing failed: " + ex.Message); }
+        }));
     }
 
     private void RefreshStatus()
