@@ -680,7 +680,15 @@ internal sealed class Engine : IDisposable
     {
         _stop = true;
         _wake.Set();
-        _worker.Join(5000); // a large file may still be compressing inside the kernel call
+        // The worker stops at the next file boundary. A large file may still be compressing inside the kernel call,
+        // which can't be interrupted; Windows finishes it before the process can end.
+        if (_worker.IsAlive)
+        {
+            string cur; lock (_lock) { cur = _curFile ?? ""; }
+            Log.Write($"Exit: stopping after the current file{(cur.Length > 0 ? " (" + cur + ")" : "")}...");
+            if (!_worker.Join(5000))
+                Log.Write("Exit: still finishing the current file; the process ends when Windows completes it.");
+        }
         lock (_lock) { try { _state.Save(); } catch { } }
         lock (_watchers) { foreach (var w in _watchers) w.Dispose(); _watchers.Clear(); }
         _debounceTimer.Dispose();

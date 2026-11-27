@@ -59,7 +59,7 @@ internal static class Installer
 
             // 2. Copy self into place, retrying while the target is locked.
             Directory.CreateDirectory(InstallDir);
-            CopyWithRetry(src, InstallPath, TimeSpan.FromSeconds(30));
+            CopyWithRetry(src, InstallPath, TimeSpan.FromMinutes(3));
             Log.Write($"Installer: copied to {InstallPath} ({(isUpdate ? "update" : "new install")})");
 
             // 3. Canonical Start Menu shortcut (setting, on by default) + stray cleanup.
@@ -115,11 +115,18 @@ internal static class Installer
         catch (WaitHandleCannotBeOpenedException) { /* nothing running (or a build without the exit event) */ }
         catch (Exception ex) { Log.Write("Installer: exit signal failed: " + ex.Message); }
 
-        var deadline = DateTime.UtcNow.AddSeconds(10);
+        // Give it time to finish the file it's compressing (it stops at the next file boundary).
+        var deadline = DateTime.UtcNow.AddSeconds(15);
+        var nextNote = DateTime.UtcNow.AddSeconds(3);
         while (DateTime.UtcNow < deadline)
         {
             if (FindInstances(installedOnly: false).Count == 0) return;
             if (!signalled && FindInstances(installedOnly: true).Count == 0) break; // only foreign copies; nothing to wait for
+            if (signalled && DateTime.UtcNow >= nextNote)
+            {
+                Log.Write("Installer: waiting for old copy to finish current file...");
+                nextNote = DateTime.UtcNow.AddSeconds(10);
+            }
             Thread.Sleep(250);
         }
 
@@ -134,6 +141,34 @@ internal static class Installer
             catch (Exception ex) { Log.Write($"Installer: kill failed for pid {p.Id}: {ex.Message}"); }
             finally { p.Dispose(); }
         }
+
+        // A process stuck in a kernel compression call can't end until Windows finishes that file, even after
+        // a kill. Keep waiting (up to 3 minutes) so the exe unlocks before we copy and relaunch.
+        var start = DateTime.UtcNow;
+        var killDeadline = start.AddMinutes(3);
+        nextNote = start;
+        while (DateTime.UtcNow < killDeadline)
+        {
+            var left = FindInstances(installedOnly: true);
+            if (left.Count == 0)
+            {
+                if (DateTime.UtcNow - start > TimeSpan.FromSeconds(1))
+                    Log.Write($"Installer: old copy exited after {(DateTime.UtcNow - start).TotalSeconds:0} s more.");
+                break;
+            }
+            if (DateTime.UtcNow >= nextNote)
+            {
+                Log.Write($"Installer: waiting for old copy (pid {string.Join(", ", left.Select(p => p.Id))}) to finish current file... ({(DateTime.UtcNow - start).TotalSeconds:0} s)");
+                nextNote = DateTime.UtcNow.AddSeconds(10);
+            }
+            foreach (var p in left) p.Dispose();
+            Thread.Sleep(500);
+        }
+        if (FindInstances(installedOnly: true) is { Count: > 0 } stuck)
+        {
+            foreach (var p in stuck) { Log.Write($"Installer: old copy pid {p.Id} still hasn't exited after 3 min; trying to install anyway."); p.Dispose(); }
+        }
+
         foreach (var p in FindInstances(installedOnly: false))
         {
             Log.Write($"Installer: another copy is still running from {SafePath(p)} (pid {p.Id}); not touching it.");

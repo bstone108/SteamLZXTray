@@ -165,12 +165,12 @@ internal sealed class IdleMonitor : IDisposable
     }
 
     // Normal Windows functions that must never count as a foreground game (lock screen, logon/UAC,
-    // shell, Start, search, touch keyboard, screensavers). Matched on process name without ".exe".
+    // shell, Start, search, touch keyboard, Snipping Tool / Win+Shift+S overlay, screensavers). Matched on process name without ".exe".
     private static readonly HashSet<string> SystemForegroundProcesses = new(StringComparer.OrdinalIgnoreCase)
     {
         "LockApp", "LogonUI", "consent", "winlogon", "explorer", "ShellExperienceHost",
         "StartMenuExperienceHost", "SearchHost", "SearchApp", "SearchUI", "TextInputHost",
-        "ShellHost", "dwm", "csrss",
+        "ShellHost", "dwm", "csrss", "SnippingTool", "ScreenClippingHost",
     };
 
     /// <summary>True when the session is locked, on the logon/UAC secure desktop, or a screensaver is running.
