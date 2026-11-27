@@ -86,7 +86,7 @@ internal enum ScheduleMode { Daily, Interval, ManualOnly }
 
 internal sealed class AppSettings
 {
-    public int CpuThresholdPercent { get; set; } = 30;
+    public int CpuThresholdPercent { get; set; } = 50;
     /// <summary>Max disk throughput (MB/s) on the drive being compressed from OTHER processes (own I/O excluded).</summary>
     public int DriveThresholdMBps { get; set; } = 50;
     public ScheduleMode ScheduleMode { get; set; } = ScheduleMode.Daily;

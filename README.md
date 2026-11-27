@@ -38,7 +38,7 @@ Get the latest build from **[Releases](https://github.com/bstone108/SteamLZXTray
   - **Not beneficial** (`ERROR_COMPRESSION_NOT_BENEFICIAL`, or no size reduction) or a hard failure: added to the **skip list** (path + size + mtime). The file isn't tried again until its size or mtime changes.
   - **Timestamps are preserved**: the original created/accessed/modified times are written back after compressing.
 - **Idle gating**, checked before every file and samples every second:
-  - CPU load from other processes, with this app's own CPU subtracted (default max 30%).
+  - CPU load from other processes, with this app's own CPU subtracted (default max 50%).
   - No game in the foreground: Steam's `RunningAppID != 0`, or the foreground process's exe is inside a Steam library or custom folder, or (optional, on by default) any fullscreen app.
   - Disk throughput from **other processes** on the drive being compressed (default max 50 MB/s, configurable). It's read from the PDH counter `\LogicalDisk(X:)\Disk Bytes/sec` (English counter names, so it works on any Windows language) minus this app's own I/O. Existing `DriveThresholdMBps` values in `settings.json` are kept.
   - After any wait, conditions must stay good for about 5 s before work resumes.

@@ -34,7 +34,7 @@ internal static class InstructionsTab
         }),
         ("Settings (click \"Save settings\" to apply)", new[]
         {
-            "Max CPU load (other processes): the app waits while other programs use more CPU than this percentage. Its own CPU use isn't counted. Default 30%.",
+            "Max CPU load (other processes): the app waits while other programs use more CPU than this percentage. Its own CPU use isn't counted. Default 50%.",
             "Max drive activity (other processes): the app waits while other programs read or write more than this many MB/s on the drive being compressed. Its own disk use isn't counted. Default 50 MB/s.",
             "Minimum file size: files smaller than this (in KB) are skipped. Default 4 KB.",
             "Schedule - Daily at: start a pass once a day at this time. If the PC was off at that time, one pass starts next time the app runs.",
