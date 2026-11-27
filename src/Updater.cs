@@ -1,4 +1,6 @@
 using System.Diagnostics;
+using System.Net.NetworkInformation;
+using System.Net.Sockets;
 using System.Net.Http.Headers;
 using System.Security.Cryptography;
 using System.Text.Json;
@@ -29,10 +31,91 @@ internal sealed class Updater : IDisposable
     /// <summary>Raised when a newer version is found but auto-install is off.</summary>
     public event Action<string>? UpdateAvailable;
 
+    // No-internet handling: instead of reporting a failure, wait until the network has been up for 2 minutes, then retry.
+    private static readonly TimeSpan NetworkStableFor = TimeSpan.FromMinutes(2);
+    private static readonly TimeSpan ProbeEvery = TimeSpan.FromSeconds(15);
+    private readonly CancellationTokenSource _cts = new();
+    private readonly AutoResetEvent _netChanged = new(false);
+    private volatile bool _netAvailable = true;
+    private int _waitingForNetwork; // 1 while the wait loop runs
+
     public Updater(Func<AppSettings> settings)
     {
         _settings = settings;
+        NetworkChange.NetworkAvailabilityChanged += OnNetworkAvailabilityChanged;
         _timer = new System.Threading.Timer(_ => _ = CheckAsync(manual: false, forceInstall: false), null, FirstDelay, Interval);
+    }
+
+    private void OnNetworkAvailabilityChanged(object? sender, NetworkAvailabilityEventArgs e)
+    {
+        _netAvailable = e.IsAvailable;
+        try { _netChanged.Set(); } catch { }
+    }
+
+    /// <summary>True when the exception means GitHub couldn't be reached at all (offline, DNS, connect failure, timeout).</summary>
+    private static bool IsNoNetwork(Exception ex)
+    {
+        if (!NetworkInterface.GetIsNetworkAvailable()) return true;
+        for (Exception? e = ex; e != null; e = e.InnerException)
+        {
+            if (e is HttpRequestException hre && hre.HttpRequestError is HttpRequestError.NameResolutionError or HttpRequestError.ConnectionError)
+                return true;
+            if (e is SocketException se && se.SocketErrorCode is SocketError.HostNotFound or SocketError.TryAgain or SocketError.NoData
+                    or SocketError.NetworkUnreachable or SocketError.NetworkDown or SocketError.HostUnreachable or SocketError.HostDown
+                    or SocketError.TimedOut or SocketError.ConnectionRefused or SocketError.ConnectionReset or SocketError.ConnectionAborted)
+                return true;
+            if (e is TaskCanceledException or TimeoutException) return true; // HttpClient timeout
+        }
+        return false;
+    }
+
+    private void StartWaitingForNetwork()
+    {
+        SetProgress("waiting for network");
+        if (Interlocked.Exchange(ref _waitingForNetwork, 1) == 1) return;
+        Log.Write("Update check: no network; waiting until it has been up for 2 minutes.");
+        _ = Task.Run(WaitForNetworkThenCheck);
+    }
+
+    private async Task WaitForNetworkThenCheck()
+    {
+        var token = _cts.Token;
+        try
+        {
+            DateTime? upSince = null;
+            while (!token.IsCancellationRequested)
+            {
+                bool up = _netAvailable && NetworkInterface.GetIsNetworkAvailable() && await ProbeGitHub(token);
+                if (!up) upSince = null;
+                else
+                {
+                    upSince ??= DateTime.UtcNow;
+                    if (DateTime.UtcNow - upSince.Value >= NetworkStableFor) break;
+                }
+                // Sleep until the next probe; a network change wakes us early (going down resets the 2-minute window).
+                await Task.Run(() => WaitHandle.WaitAny(new[] { _netChanged, token.WaitHandle }, ProbeEvery), CancellationToken.None);
+            }
+        }
+        catch (Exception ex) { Log.Write("Update check: network wait error: " + ex.Message); }
+        finally { Interlocked.Exchange(ref _waitingForNetwork, 0); }
+
+        if (token.IsCancellationRequested) return;
+        Log.Write("Update check: network has been up for 2 minutes; retrying.");
+        await CheckAsync(manual: false, forceInstall: false);
+    }
+
+    /// <summary>Any HTTP response from api.github.com means the network path works.</summary>
+    private static async Task<bool> ProbeGitHub(CancellationToken token)
+    {
+        try
+        {
+            using var http = NewClient();
+            http.Timeout = TimeSpan.FromSeconds(10);
+            using var req = new HttpRequestMessage(HttpMethod.Head, "https://api.github.com/");
+            using var resp = await http.SendAsync(req, token);
+            return true;
+        }
+        catch { return false; }
     }
 
     public string LastResult { get { lock (_lock) return _lastResult; } }
@@ -102,6 +185,11 @@ internal sealed class Updater : IDisposable
 
             await DownloadVerifyAndLaunch(http, tag, exeUrl, sumsUrl);
             return tag;
+        }
+        catch (Exception ex) when (IsNoNetwork(ex))
+        {
+            StartWaitingForNetwork(); // not a failure: retry once the network has been up for 2 minutes
+            return null;
         }
         catch (Exception ex)
         {
@@ -192,5 +280,11 @@ internal sealed class Updater : IDisposable
         catch { }
     }
 
-    public void Dispose() { _timer.Dispose(); _busy.Dispose(); }
+    public void Dispose()
+    {
+        NetworkChange.NetworkAvailabilityChanged -= OnNetworkAvailabilityChanged;
+        try { _cts.Cancel(); } catch { }
+        _timer.Dispose();
+        _busy.Dispose();
+    }
 }
