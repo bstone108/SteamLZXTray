@@ -1,0 +1,10 @@
+# .NET build output
+bin/
+obj/
+publish*/
+*.zip
+*.exe
+*.user
+*.suo
+.vs/
+*.log
