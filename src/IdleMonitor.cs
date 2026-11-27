@@ -14,8 +14,8 @@ internal sealed class IdleMonitor : IDisposable
     private readonly object _lock = new();
 
     private IntPtr _query;
-    private readonly Dictionary<string, IntPtr> _diskCounters = new(StringComparer.OrdinalIgnoreCase);
-    private readonly Dictionary<string, double> _diskBytesPerSec = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, IntPtr> _diskCounters = new(StringComparer.OrdinalIgnoreCase);     // Disk Bytes/sec
+    private readonly Dictionary<string, double> _diskBytesPerSec = new(StringComparer.OrdinalIgnoreCase);  // total, raw
     private readonly HashSet<string> _wantedDrives = new(StringComparer.OrdinalIgnoreCase);
 
     private long _lastIdle, _lastKernel, _lastUser;
@@ -59,6 +59,14 @@ internal sealed class IdleMonitor : IDisposable
 
     public static string? DriveOf(string path) =>
         path.Length >= 2 && path[1] == ':' ? char.ToUpperInvariant(path[0]) + ":" : null;
+
+    /// <summary>Total drive throughput (all processes), for the status readout only. -1 if unknown.</summary>
+    public double TotalDiskBytesPerSec(string volumeRoot)
+    {
+        string? d = DriveOf(volumeRoot);
+        if (d == null) return -1;
+        lock (_lock) return _diskBytesPerSec.TryGetValue(d, out var v) ? v : -1;
+    }
 
     /// <summary>Disk bytes/sec on the volume from other processes (own I/O subtracted). -1 if unknown.</summary>
     public double OtherDiskBytesPerSec(string volumeRoot)
@@ -133,6 +141,7 @@ internal sealed class IdleMonitor : IDisposable
             }
             if (Native.PdhCollectQueryData(_query) == 0)
             {
+                double own = OwnIoBytesPerSec;
                 lock (_lock)
                     foreach (var kv in _diskCounters)
                     {
@@ -140,8 +149,9 @@ internal sealed class IdleMonitor : IDisposable
                         if (Native.PdhGetFormattedCounterValue(kv.Value, Native.PDH_FMT_DOUBLE | Native.PDH_FMT_NOCAP100, out _, out var v) == 0
                             && (v.CStatus == 0 || v.CStatus == 1)) // PDH_CSTATUS_VALID_DATA / NEW_DATA
                         {
-                            _diskBytesPerSec[kv.Key] = v.doubleValue;
-                            double otherNow = Math.Max(0, v.doubleValue - OwnIoBytesPerSec);
+                            double total = Math.Max(0, v.doubleValue);
+                            _diskBytesPerSec[kv.Key] = total;
+                            double otherNow = Math.Max(0, total - own); // exclude our own I/O
                             _diskSmoothed[kv.Key] = _diskSmoothed.TryGetValue(kv.Key, out var prev) ? prev * 0.6 + otherNow * 0.4 : otherNow;
                         }
                     }

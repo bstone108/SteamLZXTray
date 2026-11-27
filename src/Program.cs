@@ -5,7 +5,7 @@ namespace SteamLZXTray;
 internal static class AppInfo
 {
     public static string Version =>
-        Assembly.GetExecutingAssembly().GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion ?? "0.1.0-test2";
+        Assembly.GetExecutingAssembly().GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion ?? "dev";
 }
 
 internal static class Program
@@ -24,7 +24,7 @@ internal static class Program
 
         // Anything not launched from the canonical install path is an installer/updater only.
         if (!Installer.IsRunningFromInstallPath)
-            return Installer.RunInstall();
+            return Installer.RunInstall(silent: args.Any(a => a.Equals("--update", StringComparison.OrdinalIgnoreCase)));
 
         string? postInstall = args.FirstOrDefault(a => a.StartsWith(Installer.PostInstallArg, StringComparison.OrdinalIgnoreCase))
             ?.Substring(Installer.PostInstallArg.Length);
@@ -69,6 +69,7 @@ internal sealed class TrayContext : ApplicationContext
     private readonly NotifyIcon _tray;
     private readonly IconSet _icons = new();
     private readonly Engine _engine;
+    private readonly Updater _updater;
     private readonly MainForm _form;
     private readonly System.Windows.Forms.Timer _anim = new() { Interval = 80 };
     private readonly ToolStripMenuItem _miPause;
@@ -82,7 +83,8 @@ internal sealed class TrayContext : ApplicationContext
     public TrayContext(AppSettings settings, EventWaitHandle showEvent, EventWaitHandle exitEvent, string? postInstall)
     {
         _engine = new Engine(settings);
-        _form = new MainForm(_engine, _icons.Idle) { ExitRequested = ExitApp };
+        _updater = new Updater(() => _engine.Settings);
+        _form = new MainForm(_engine, _icons.Idle) { ExitRequested = ExitApp, Updater = _updater };
         _ = _form.Handle; // create handle (hidden) so BeginInvoke works
 
         var menu = new ContextMenuStrip();
@@ -113,6 +115,12 @@ internal sealed class TrayContext : ApplicationContext
         _anim.Tick += (_, _) => Animate();
         _anim.Start();
         _engine.Start();
+
+        _updater.InstallStarting += tag => { try { _engine.SaveNow(); } catch { } };
+        _updater.UpdateAvailable += tag =>
+        {
+            try { _form.BeginInvoke(new Action(() => _tray.ShowBalloonTip(6000, "Steam LZX Tray", $"Update {tag} is available. Open Settings to install it.", ToolTipIcon.Info))); } catch { }
+        };
 
         if (postInstall != null)
         {
@@ -170,6 +178,7 @@ internal sealed class TrayContext : ApplicationContext
         {
             _showWait.Unregister(null);
             _exitWait.Unregister(null);
+            _updater.Dispose();
             _anim.Dispose();
             _tray.Dispose();
             _form.Dispose();

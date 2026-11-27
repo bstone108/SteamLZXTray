@@ -27,10 +27,10 @@ internal static class Installer
     public static bool IsRunningFromInstallPath => SamePath(CurrentExe, InstallPath);
 
     /// <summary>Returns process exit code. Never starts the engine or tray.</summary>
-    public static int RunInstall()
+    public static int RunInstall(bool silent = false)
     {
         string src = CurrentExe;
-        Log.Write($"Installer: launched from {src}; install path {InstallPath}");
+        Log.Write($"Installer{(silent ? " (silent update)" : "")}: launched from {src}; install path {InstallPath}");
         try
         {
             bool isUpdate = File.Exists(InstallPath);
@@ -38,7 +38,11 @@ internal static class Installer
             // 1. Ask any running instance to save state and exit; kill only our installed copy if it hangs.
             StopRunningInstance();
             var foreign = FindInstances(installedOnly: false);
-            if (foreign.Count > 0)
+            if (foreign.Count > 0 && silent)
+            {
+                foreach (var p in foreign) { Log.Write($"Installer (silent update): copy still running from {SafePath(p)} (pid {p.Id}); continuing."); p.Dispose(); }
+            }
+            else if (foreign.Count > 0)
             {
                 // e.g. an older test build started from the Desktop: it holds the single-instance mutex
                 // and doesn't know the exit signal. We never kill a copy outside the install path.
@@ -80,7 +84,19 @@ internal static class Installer
         catch (Exception ex)
         {
             Log.Write("Installer failed: " + ex);
-            MessageBox.Show($"Steam LZX Tray could not install to\n{InstallPath}\n\n{ex.Message}\n\nSee the log in {AppPaths.Logs}.",
+            if (silent && File.Exists(InstallPath))
+            {
+                // Auto-update failed after we stopped the running copy: bring the existing install back.
+                try
+                {
+                    var back = new ProcessStartInfo(InstallPath) { UseShellExecute = false, WorkingDirectory = InstallDir };
+                    back.ArgumentList.Add("--tray");
+                    Process.Start(back);
+                    Log.Write("Installer: update failed; restarted the existing installed copy.");
+                }
+                catch (Exception ex2) { Log.Write("Installer: could not restart existing copy: " + ex2.Message); }
+            }
+            if (!silent) MessageBox.Show($"Steam LZX Tray could not install to\n{InstallPath}\n\n{ex.Message}\n\nSee the log in {AppPaths.Logs}.",
                 "Steam LZX Tray setup", MessageBoxButtons.OK, MessageBoxIcon.Error);
             return 1;
         }

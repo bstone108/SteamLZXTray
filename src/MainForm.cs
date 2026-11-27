@@ -44,6 +44,12 @@ internal sealed class MainForm : Form
     private readonly Button _btnSave = new() { Text = "Save settings", AutoSize = true };
     private readonly Button _btnUninstall = new() { Text = "Uninstall...", AutoSize = true };
 
+    private readonly CheckBox _chkAutoUpdate = new() { Text = "Automatically install updates (checks GitHub releases at startup + every 6 h)", AutoSize = true };
+    private readonly Button _btnCheckUpdate = new() { Text = "Check for updates now", AutoSize = true };
+    private readonly Label _lblVersion = new() { AutoSize = true, ForeColor = Color.DimGray };
+
+    public Updater? Updater { get; set; }
+
     /// <summary>Set by the tray context: saves state and exits the app.</summary>
     public Action? ExitRequested { get; set; }
 
@@ -80,6 +86,19 @@ internal sealed class MainForm : Form
         _btnRescan.Click += (_, _) => _engine.Rescan();
         _btnSave.Click += (_, _) => SaveSettings();
         _btnUninstall.Click += (_, _) => Uninstall();
+        _btnCheckUpdate.Click += async (_, _) =>
+        {
+            if (Updater == null) return;
+            _btnCheckUpdate.Enabled = false;
+            try
+            {
+                var tag = await Updater.CheckAsync(manual: true, forceInstall: false);
+                if (tag != null && !_engine.Settings.AutoInstallUpdates &&
+                    MessageBox.Show(this, $"Version {tag} is available. Install it now?", Text, MessageBoxButtons.YesNo, MessageBoxIcon.Question) == DialogResult.Yes)
+                    await Updater.CheckAsync(manual: true, forceInstall: true);
+            }
+            finally { _btnCheckUpdate.Enabled = true; RefreshStatus(); }
+        };
         _btnAddFolder.Click += (_, _) => AddFolder();
         _btnRemoveFolder.Click += (_, _) =>
         {
@@ -118,11 +137,12 @@ internal sealed class MainForm : Form
     private TabPage BuildStatusTab()
     {
         var page = new TabPage("Status") { Padding = new Padding(8) };
-        var t = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 8 };
+        var t = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 9 };
         t.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         t.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         t.RowStyles.Add(new RowStyle(SizeType.Absolute, 22));
         t.RowStyles.Add(new RowStyle(SizeType.Absolute, 22));
+        t.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         t.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         t.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         t.RowStyles.Add(new RowStyle(SizeType.AutoSize));
@@ -133,6 +153,7 @@ internal sealed class MainForm : Form
         t.Controls.Add(_lblFile);
         t.Controls.Add(_lblStats);
         t.Controls.Add(_lblMetrics);
+        t.Controls.Add(_lblVersion);
         var buttons = new FlowLayoutPanel { AutoSize = true, Dock = DockStyle.Fill, Padding = new Padding(0, 6, 0, 6) };
         buttons.Controls.AddRange(new Control[] { _btnRun, _btnPause, _btnRescan, _btnClearSkip, _btnResetLog });
         t.Controls.Add(buttons);
@@ -168,12 +189,13 @@ internal sealed class MainForm : Form
         Label Note(string s) => new() { Text = s, AutoSize = true, ForeColor = Color.DimGray, Padding = new Padding(0, 6, 0, 0) };
 
         Row("Max CPU load (other processes):", Flow(_numCpu, Note("%")));
-        Row("Max drive activity (other processes):", Flow(_numDrive, Note("MB/s on the drive being compressed")));
+        Row("Max drive activity (other processes):", Flow(_numDrive, Note("MB/s on the drive being compressed (own I/O excluded)")));
         Row("Minimum file size:", Flow(_numMinKb, Note("KB (smaller files are skipped)")));
         Row("Schedule:", Flow(_rbDaily, _dtDaily, new Label { Width = 16 }, _rbInterval, _numHours, Note("hours"), new Label { Width = 16 }, _rbManual));
         Row("", _chkWatch);
         Row("", _chkFullscreen);
         Row("Excluded drives:", Flow(_txtExcluded, Note("comma separated drive letters, e.g. X:, Y:  (never touched; empty = none)")));
+        Row("", Flow(_chkAutoUpdate, new Label { Width = 16 }, _btnCheckUpdate));
         Row("", _chkAutostart);
         Row("", _chkShortcut);
 
@@ -231,6 +253,7 @@ internal sealed class MainForm : Form
             _numHours.Value = Math.Clamp(s.IntervalHours, 1, 720);
             _chkWatch.Checked = s.WatchSteamUpdates;
             _chkFullscreen.Checked = s.TreatFullscreenAsGame;
+            _chkAutoUpdate.Checked = s.AutoInstallUpdates;
             _txtExcluded.Text = string.Join(", ", s.ExcludedDrives);
             _lstCustom.Items.Clear();
             foreach (var f in s.CustomFolders) _lstCustom.Items.Add(f);
@@ -265,6 +288,7 @@ internal sealed class MainForm : Form
             WatchSteamUpdates = _chkWatch.Checked,
             TreatFullscreenAsGame = _chkFullscreen.Checked,
             StartMenuShortcut = _chkShortcut.Checked,
+            AutoInstallUpdates = _chkAutoUpdate.Checked,
             ExcludedDrives = ParseDrives(_txtExcluded.Text),
             CustomFolders = _lstCustom.Items.Cast<string>().ToList(),
         };
@@ -283,7 +307,7 @@ internal sealed class MainForm : Form
                 l.Kind == LibraryKind.Steam ? "Steam" : "Custom",
                 l.Path,
                 l.FileSystem,
-                l.Supported ? "Compressible" : "Skipped: " + l.Status,
+                l.Supported ? $"OK ({l.UnitCount} units, {l.CompletedCount} done)" : "Skipped: " + l.Status,
                 l.Supported ? l.UnitCount.ToString() : "-",
                 l.Supported ? $"{l.CompletedCount}/{l.UnitCount}" : "-",
             });
@@ -308,10 +332,13 @@ internal sealed class MainForm : Form
             (st.LastRunCompletedUtc is DateTime d ? $"    Last run finished: {d.ToLocalTime():g}" : "") +
             (st.PendingTriggers > 0 ? $"    Queued Steam updates: {st.PendingTriggers}" : "");
         _lblFile.Text = st.File.Length > 0 ? "File: " + st.File : "";
-        _lblStats.Text = $"This run: {st.RunFilesProcessed:N0} files checked, {st.RunFilesCompressed:N0} compressed, {Fmt.Bytes(st.RunBytesSaved)} saved      " +
+        var (done, total) = _engine.CompletedTotals();
+        _lblStats.Text = $"Games/folders fully compressed: {done:N0} / {total:N0}      This run: {st.RunFilesProcessed:N0} files checked, {st.RunFilesCompressed:N0} compressed, {Fmt.Bytes(st.RunBytesSaved)} saved      " +
                          $"All time: {st.TotalFilesCompressed:N0} files, {Fmt.Bytes(st.TotalBytesSaved)} saved      Skip list: {st.SkipListCount:N0}";
-        _lblMetrics.Text = $"CPU (other processes): {st.CpuOther:0}%" + (st.DiskOtherMBps >= 0 ? $"    Drive (other processes): {st.DiskOtherMBps:0.0} MB/s" : "");
+        _lblMetrics.Text = $"CPU (other processes): {st.CpuOther:0}%" + (st.DiskOtherMBps >= 0 ? $"    Drive (other processes): {st.DiskOtherMBps:0.0} MB/s" : "")
+            + (st.DiskTotalMBps >= 0 ? $"    Drive throughput (all): {st.DiskTotalMBps:0.0} MB/s" : "");
         _btnPause.Text = _engine.Paused ? "Resume" : "Pause";
+        _lblVersion.Text = $"Version {AppInfo.Version}    Last update check: {Updater?.LastResult ?? "-"}";
 
         if (Log.Version != _logVersion)
         {

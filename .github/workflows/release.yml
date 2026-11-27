@@ -1,0 +1,89 @@
+name: Release
+
+# Builds only when a version tag is pushed (v2026.11.26.01 style). No builds on push/PR.
+# workflow_dispatch builds an artifact for testing but never publishes a release.
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Determine version
+        id: ver
+        shell: pwsh
+        run: |
+          if ($env:GITHUB_REF_TYPE -eq 'tag') {
+            $v = $env:GITHUB_REF_NAME -replace '^v', ''
+          } else {
+            $v = (Get-Content VERSION.txt -Raw).Trim()
+          }
+          if ($v -notmatch '^\d{4}\.\d{2}\.\d{2}\.\d{2,}$') { throw "Version '$v' is not YYYY.MM.DD.BB (zero-padded)" }
+          $file = ([version]$v).ToString()   # 2026.11.26.01 -> 2026.11.26.1 (Win32 file version)
+          $txt = (Get-Content VERSION.txt -Raw).Trim()
+          if ($env:GITHUB_REF_TYPE -eq 'tag' -and $txt -ne $v) { Write-Warning "VERSION.txt ($txt) differs from tag ($v); the tag wins." }
+          "version=$v" >> $env:GITHUB_OUTPUT
+          "fileversion=$file" >> $env:GITHUB_OUTPUT
+          Write-Host "Version $v (file version $file)"
+
+      - name: Publish (win-x64, self-contained, single file)
+        shell: pwsh
+        run: |
+          dotnet publish src/SteamLZXTray.csproj -c Release -r win-x64 --self-contained true `
+            -p:PublishSingleFile=true -p:AppVersion=${{ steps.ver.outputs.version }} -o publish
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if (-not (Test-Path publish/SteamLZXTray.exe)) { throw "SteamLZXTray.exe not produced" }
+          $pv = (Get-Item publish/SteamLZXTray.exe).VersionInfo
+          Write-Host "ProductVersion=$($pv.ProductVersion) FileVersion=$($pv.FileVersion)"
+
+      - name: Package
+        id: pkg
+        shell: pwsh
+        run: |
+          $v = '${{ steps.ver.outputs.version }}'
+          New-Item -ItemType Directory -Force dist-release | Out-Null
+          Copy-Item publish/SteamLZXTray.exe dist-release/
+          $zipName = "SteamLZXTray-$v-win-x64.zip"
+          New-Item -ItemType Directory -Force zipstage | Out-Null
+          Copy-Item publish/SteamLZXTray.exe, README.md, LICENSE zipstage/
+          Compress-Archive -Path zipstage/* -DestinationPath "dist-release/$zipName" -Force
+          Push-Location dist-release
+          $lines = Get-ChildItem SteamLZXTray.exe, $zipName | ForEach-Object {
+            "{0}  {1}" -f (Get-FileHash $_.Name -Algorithm SHA256).Hash.ToLowerInvariant(), $_.Name
+          }
+          [IO.File]::WriteAllText("$PWD/SHA256SUMS.txt", (($lines -join "`n") + "`n"))
+          Get-Content SHA256SUMS.txt
+          Pop-Location
+          "zip=$zipName" >> $env:GITHUB_OUTPUT
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: SteamLZXTray-${{ steps.ver.outputs.version }}
+          path: dist-release/*
+
+      - name: Create GitHub Release
+        if: github.ref_type == 'tag'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $v = '${{ steps.ver.outputs.version }}'
+          $notes = "Steam LZX Tray $v`n`nWindows 11 x64, self-contained single-file exe (no .NET install needed). Unsigned.`n`nRun SteamLZXTray.exe once: it installs itself to %LOCALAPPDATA%\Programs\SteamLZXTray and starts in the tray. Running a newer exe later updates in place.`n`nVerify with SHA256SUMS.txt."
+          gh release create "$env:GITHUB_REF_NAME" `
+            dist-release/SteamLZXTray.exe `
+            dist-release/SHA256SUMS.txt `
+            "dist-release/${{ steps.pkg.outputs.zip }}" `
+            --title "Steam LZX Tray $v" --notes "$notes" --verify-tag

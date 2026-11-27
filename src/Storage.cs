@@ -87,13 +87,16 @@ internal enum ScheduleMode { Daily, Interval, ManualOnly }
 internal sealed class AppSettings
 {
     public int CpuThresholdPercent { get; set; } = 30;
-    public int DriveThresholdMBps { get; set; } = 20;
+    /// <summary>Max disk throughput (MB/s) on the drive being compressed from OTHER processes (own I/O excluded).</summary>
+    public int DriveThresholdMBps { get; set; } = 50;
     public ScheduleMode ScheduleMode { get; set; } = ScheduleMode.Daily;
     public string DailyTime { get; set; } = "03:00";
     public int IntervalHours { get; set; } = 6;
     public bool WatchSteamUpdates { get; set; } = true;
     public int MinFileSizeKB { get; set; } = 4;
     public bool TreatFullscreenAsGame { get; set; } = true;
+    /// <summary>Install newer GitHub releases automatically (on by default).</summary>
+    public bool AutoInstallUpdates { get; set; } = true;
     /// <summary>Canonical Start Menu shortcut (on by default).</summary>
     public bool StartMenuShortcut { get; set; } = true;
     public List<string> CustomFolders { get; set; } = new();

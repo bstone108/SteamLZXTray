@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+# Prints the next release version: YYYY.MM.DD.BB (America/Chicago date, every part zero-padded to >= 2 digits).
+# Looks at existing tags for today (padded v2026.11.26.* and legacy unpadded v2026.11.26.*/v2026.8.4.*).
+# Usage: scripts/next-version [--write]   (--write also updates VERSION.txt; do this only when cutting a release)
+set -euo pipefail
+cd "$(dirname "$0")/.."
+git fetch --tags --quiet 2>/dev/null || true
+Y=$(TZ=America/Chicago date +%Y); M=$(TZ=America/Chicago date +%m); D=$(TZ=America/Chicago date +%d)
+m=$((10#$M)); d=$((10#$D))
+max=0
+while read -r t; do
+  [ -z "$t" ] && continue
+  b=${t##*.}
+  [[ "$b" =~ ^[0-9]+$ ]] || continue
+  b=$((10#$b))
+  (( b > max )) && max=$b
+done < <(git tag -l "v$Y.$M.$D.*" "v$Y.$m.$d.*" | sort -u)
+next=$((max + 1))
+ver=$(printf '%s.%s.%s.%02d' "$Y" "$M" "$D" "$next")
+if [ "${1:-}" = "--write" ]; then echo "$ver" > VERSION.txt; fi
+echo "$ver"

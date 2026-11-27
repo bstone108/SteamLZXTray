@@ -12,7 +12,7 @@ internal sealed class EngineStatus
     public string Library = "", Game = "", File = "";
     public long RunFilesProcessed, RunFilesCompressed, RunBytesSaved, TotalBytesSaved, TotalFilesCompressed;
     public int SkipListCount, PendingTriggers;
-    public double CpuOther, DiskOtherMBps = -1;
+    public double CpuOther, DiskOtherMBps = -1, DiskTotalMBps = -1;
     public DateTime? LastRunCompletedUtc, LastScheduledRunUtc;
     public string NextSchedule = "";
 }
@@ -49,7 +49,8 @@ internal sealed class Engine : IDisposable
         _monitor.TreatFullscreenAsGame = settings.TreatFullscreenAsGame;
         _debounceTimer = new System.Threading.Timer(_ => ProcessDebouncedManifests(), null, Timeout.Infinite, Timeout.Infinite);
         if (_state.ActiveRun != RunKind.None)
-            Log.Write($"Interrupted {_state.ActiveRun} run found; will resume at '{_state.CurrentUnitKey}' after '{_state.LastCompletedRelPath}'.");
+            Log.Write($"Pass in progress ({_state.ActiveRun}) found in state; resuming immediately at '{_state.CurrentUnitKey}' after '{_state.LastCompletedRelPath}'" +
+                      (_state.PendingTriggerKeys.Count > 0 ? $"; {_state.PendingTriggerKeys.Count} Steam update(s) queued" : "") + ".");
         _worker = new Thread(WorkerMain) { IsBackground = true, Name = "LZXWorker" };
     }
 
@@ -105,7 +106,13 @@ internal sealed class Engine : IDisposable
         st.CpuOther = _monitor.OtherCpuSmoothed;
         string vol = "";
         lock (_lock) vol = _curVolume;
-        if (vol.Length > 0) { var d = _monitor.OtherDiskBytesPerSec(vol); st.DiskOtherMBps = d < 0 ? -1 : d / 1048576.0; }
+        if (vol.Length > 0)
+        {
+            var o = _monitor.OtherDiskBytesPerSec(vol);
+            st.DiskOtherMBps = o < 0 ? -1 : o / 1048576.0;
+            var t = _monitor.TotalDiskBytesPerSec(vol);
+            st.DiskTotalMBps = t < 0 ? -1 : t / 1048576.0;
+        }
         return st;
     }
     private string _curVolume = "";
@@ -271,8 +278,11 @@ internal sealed class Engine : IDisposable
         {
             case ScheduleMode.Daily:
                 if (!TimeSpan.TryParse(s.DailyTime, out var tod)) tod = TimeSpan.FromHours(3);
-                DateTime todayAt = now.Date + tod;
-                return now >= todayAt && (last == null || last < todayAt);
+                // Most recent scheduled occurrence <= now (today's, or yesterday's if today's time hasn't come).
+                // A time missed while the app was off starts one pass on next launch, never more than one.
+                DateTime occurrence = now.Date + tod;
+                if (occurrence > now) occurrence = occurrence.AddDays(-1);
+                return last == null || last < occurrence;
             case ScheduleMode.Interval:
                 return last == null || now - last.Value >= TimeSpan.FromHours(Math.Max(1, s.IntervalHours));
             default:
@@ -407,6 +417,7 @@ internal sealed class Engine : IDisposable
             }
             lock (_lock)
             {
+                if (!IsUnitLogged(u)) BumpCompleted(u);
                 _gameLog.Steam[u.Key] = new GameLogEntry { Name = u.DisplayName, BuildId = now.BuildId, Library = u.Library.Path, CompletedUtc = DateTime.UtcNow };
                 _gameLog.Save();
             }
@@ -416,11 +427,27 @@ internal sealed class Engine : IDisposable
             var (mt, count) = Signature(u);
             lock (_lock)
             {
+                if (!IsUnitLogged(u)) BumpCompleted(u);
                 _gameLog.Folders[u.Key] = new FolderLogEntry { LatestMtimeTicks = mt, FileCount = count, CompletedUtc = DateTime.UtcNow };
                 _gameLog.Save();
             }
         }
         Log.Write($"{u.DisplayName}: complete.");
+        LibrariesChanged?.Invoke(); // live refresh of the per-library and total counts
+    }
+
+    /// <summary>Caller holds _lock. Increments the completed count on the live library object shown in the UI.</summary>
+    private void BumpCompleted(WorkUnit u)
+    {
+        var lib = _libraries.FirstOrDefault(l => ReferenceEquals(l, u.Library))
+                  ?? _libraries.FirstOrDefault(l => l.Kind == u.Library.Kind && l.Path.Equals(u.Library.Path, StringComparison.OrdinalIgnoreCase));
+        if (lib != null && lib.CompletedCount < lib.UnitCount) lib.CompletedCount++;
+    }
+
+    /// <summary>Completed / total units across supported libraries (from gamelog.json at startup, live afterwards).</summary>
+    public (int Done, int Total) CompletedTotals()
+    {
+        lock (_lock) return (_libraries.Where(l => l.Supported).Sum(l => l.CompletedCount), _libraries.Where(l => l.Supported).Sum(l => l.UnitCount));
     }
 
     /// <summary>Quick signature: latest mtime (files and dirs) + file count.</summary>
