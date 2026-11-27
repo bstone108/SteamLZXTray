@@ -42,6 +42,7 @@ internal static class InstructionsTab
             "Schedule - Manual only: no scheduled passes. Passes start only from Run Now or a Steam update.",
             "Watch for Steam updates: when Steam finishes installing or updating a game, that game is queued and compressed at the next idle moment. Untick to ignore Steam updates.",
             "Treat any fullscreen app in the foreground as a game: when ticked, any fullscreen window (a video player, for example) pauses work, not just games from your libraries.",
+            "The Windows lock screen, sign-in and UAC screens, screensavers and the Windows shell (Start, search, desktop) never count as a game; a locked PC or running screensaver counts as idle.",
             "Excluded drives: drive letters to never touch, separated by commas (for example X:, Y:). Libraries on those drives show as Skipped. Empty means no drives are excluded.",
             "Automatically install updates: checks GitHub about 2 minutes after startup and then every 6 hours. If a newer release exists, it downloads it, checks its SHA256 and installs it silently. Untick to only be told an update is available.",
             "Start with Windows: starts the app in the tray when you sign in. This applies right away, no Save needed.",

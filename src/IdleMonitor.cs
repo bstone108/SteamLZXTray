@@ -162,8 +162,59 @@ internal sealed class IdleMonitor : IDisposable
         (GameInForeground, GameReason) = DetectGame();
     }
 
+    // Normal Windows functions that must never count as a foreground game (lock screen, logon/UAC,
+    // shell, Start, search, touch keyboard, screensavers). Matched on process name without ".exe".
+    private static readonly HashSet<string> SystemForegroundProcesses = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "LockApp", "LogonUI", "consent", "winlogon", "explorer", "ShellExperienceHost",
+        "StartMenuExperienceHost", "SearchHost", "SearchApp", "SearchUI", "TextInputHost",
+        "ShellHost", "dwm", "csrss",
+    };
+
+    /// <summary>True when the session is locked, on the logon/UAC secure desktop, or a screensaver is running.
+    /// That counts as idle (good for compression), never as a game.</summary>
+    internal static bool IsLockedOrScreensaver()
+    {
+        try
+        {
+            if (Native.SystemParametersInfoW(Native.SPI_GETSCREENSAVERRUNNING, 0, out bool ssRunning, 0) && ssRunning)
+                return true;
+        }
+        catch { }
+        try
+        {
+            IntPtr desk = Native.OpenInputDesktop(0, false, Native.DESKTOP_READOBJECTS);
+            if (desk == IntPtr.Zero) return true; // input desktop is Winlogon / secure desktop: locked, logon or UAC
+            try
+            {
+                var name = new StringBuilder(256);
+                if (Native.GetUserObjectInformationW(desk, Native.UOI_NAME, name, (uint)(name.Capacity * 2), out _)
+                    && !string.Equals(name.ToString(), "Default", StringComparison.OrdinalIgnoreCase))
+                    return true;
+            }
+            finally { Native.CloseDesktop(desk); }
+        }
+        catch { }
+        return false;
+    }
+
+    private static bool IsSystemForegroundProcess(uint pid, string? image)
+    {
+        string? name = image != null ? Path.GetFileName(image) : null;
+        if (name == null)
+        {
+            try { using var p = System.Diagnostics.Process.GetProcessById((int)pid); name = p.ProcessName + ".exe"; }
+            catch { return false; }
+        }
+        if (name.EndsWith(".scr", StringComparison.OrdinalIgnoreCase)) return true; // screensavers
+        return SystemForegroundProcesses.Contains(Path.GetFileNameWithoutExtension(name));
+    }
+
     private (bool, string) DetectGame()
     {
+        // Locked session, logon/UAC secure desktop or screensaver: idle, not a game.
+        if (IsLockedOrScreensaver()) return (false, "");
+
         try
         {
             using var k = Registry.CurrentUser.OpenSubKey(@"Software\Valve\Steam");
@@ -177,6 +228,7 @@ internal sealed class IdleMonitor : IDisposable
         if (pid == 0 || pid == _ownPid) return (false, "");
 
         string? image = ProcessImage(pid);
+        if (IsSystemForegroundProcess(pid, image)) return (false, "");
         if (image != null)
         {
             foreach (var root in _gameRoots)
