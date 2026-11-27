@@ -69,6 +69,7 @@ internal sealed class MainForm : Form
         var logTab = new TabPage("Log") { Padding = new Padding(6) };
         logTab.Controls.Add(_log);
         tabs.TabPages.Add(logTab);
+        tabs.TabPages.Add(InstructionsTab.Build());
         Controls.Add(tabs);
 
         _btnRun.Click += (_, _) => _engine.RunNow();
