@@ -37,6 +37,8 @@ internal sealed class Updater : IDisposable
 
     public string LastResult { get { lock (_lock) return _lastResult; } }
     private void SetResult(string s) { lock (_lock) _lastResult = $"{DateTime.Now:g}: {s}"; Log.Write("Update check: " + s); }
+    /// <summary>Transient progress shown live in Status (not logged).</summary>
+    private void SetProgress(string s) { lock (_lock) _lastResult = s; }
 
     /// <summary>Running version as 4 numeric parts (test/dev builds that don't parse count as 0.0.0.0).</summary>
     public static Version RunningVersion => ParseVersion(AppInfo.Version) ?? new Version(0, 0, 0, 0);
@@ -63,6 +65,7 @@ internal sealed class Updater : IDisposable
         if (!await _busy.WaitAsync(0)) return null;
         try
         {
+            SetProgress("checking GitHub...");
             using var http = NewClient();
             using var resp = await http.GetAsync(LatestUrl);
             if (resp.StatusCode == System.Net.HttpStatusCode.NotFound) { SetResult("no published release yet"); return null; }
@@ -116,6 +119,7 @@ internal sealed class Updater : IDisposable
         string exe = Path.Combine(dir, "SteamLZXTray.exe");
         string sums = Path.Combine(dir, "SHA256SUMS.txt");
         Log.Write($"Downloading update {tag} to {dir}");
+        SetProgress($"downloading {tag}...");
         await Download(http, sumsUrl, sums);
         await Download(http, exeUrl, exe);
 
@@ -126,6 +130,7 @@ internal sealed class Updater : IDisposable
             if (parts.Length == 2 && parts[1].TrimStart('*').Trim().Equals("SteamLZXTray.exe", StringComparison.OrdinalIgnoreCase))
                 expected = parts[0].Trim().ToLowerInvariant();
         }
+        SetProgress($"verifying {tag}...");
         string actual;
         using (var fs = File.OpenRead(exe)) actual = Convert.ToHexString(SHA256.HashData(fs)).ToLowerInvariant();
         if (expected == null || expected.Length != 64 || actual != expected)

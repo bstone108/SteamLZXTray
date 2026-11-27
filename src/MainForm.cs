@@ -9,19 +9,22 @@ internal sealed class MainForm : Form
     private long _logVersion = -1;
     private bool _loadingUi;
 
-    // status
-    private readonly Label _lblState = new() { AutoSize = true, Font = new Font(SystemFonts.MessageBoxFont!.FontFamily, 11f, FontStyle.Bold) };
-    private readonly Label _lblWait = new() { AutoSize = true, ForeColor = Color.DarkGoldenrod };
-    private readonly Label _lblCurrent = new() { AutoSize = false, Dock = DockStyle.Fill, AutoEllipsis = true };
-    private readonly Label _lblFile = new() { AutoSize = false, Dock = DockStyle.Fill, AutoEllipsis = true };
-    private readonly Label _lblStats = new() { AutoSize = true };
-    private readonly Label _lblMetrics = new() { AutoSize = true, ForeColor = Color.DimGray };
+    // status (short labelled rows; values never force the window wider)
+    private readonly ToolTip _tips = new() { AutoPopDelay = 20000, InitialDelay = 400, ReshowDelay = 100 };
+    private readonly Label _lblState = new() { AutoSize = true, Font = new Font(SystemFonts.MessageBoxFont!.FontFamily, 11f, FontStyle.Bold), Margin = new Padding(3, 2, 3, 4) };
+    private EllipsisLabel _valWait = null!, _valLibrary = null!, _valGame = null!, _valFile = null!, _valNext = null!, _valLast = null!,
+        _valQueued = null!, _valGames = null!, _valRun = null!, _valAllTime = null!, _valSkip = null!, _valCpu = null!,
+        _valDriveOther = null!, _valDriveTotal = null!, _valVersion = null!, _valUpdate = null!;
+    private TableLayoutPanel _statusOuter = null!;
+    private TabControl _tabs = null!;
+    private TabPage _statusPage = null!;
+    private int _lastLibRows = -1;
     private readonly Button _btnRun = new() { Text = "Run Now", AutoSize = true };
     private readonly Button _btnPause = new() { Text = "Pause", AutoSize = true };
     private readonly Button _btnClearSkip = new() { Text = "Clear skip list", AutoSize = true };
     private readonly Button _btnResetLog = new() { Text = "Reset game log", AutoSize = true };
     private readonly Button _btnRescan = new() { Text = "Rescan libraries", AutoSize = true };
-    private readonly ListView _libs = new() { View = View.Details, FullRowSelect = true, Dock = DockStyle.Fill, GridLines = true };
+    private readonly ListView _libs = new() { View = View.Details, FullRowSelect = true, GridLines = true, Anchor = AnchorStyles.Left | AnchorStyles.Right | AnchorStyles.Top, Scrollable = true, ShowItemToolTips = true };
     private readonly TextBox _log = new() { Multiline = true, ReadOnly = true, ScrollBars = ScrollBars.Both, WordWrap = false, Dock = DockStyle.Fill, Font = new Font(FontFamily.GenericMonospace, 8.5f) };
 
     // settings
@@ -46,7 +49,6 @@ internal sealed class MainForm : Form
 
     private readonly CheckBox _chkAutoUpdate = new() { Text = "Automatically install updates (checks GitHub releases at startup + every 6 h)", AutoSize = true };
     private readonly Button _btnCheckUpdate = new() { Text = "Check for updates now", AutoSize = true };
-    private readonly Label _lblVersion = new() { AutoSize = true, ForeColor = Color.DimGray };
 
     public Updater? Updater { get; set; }
 
@@ -59,12 +61,13 @@ internal sealed class MainForm : Form
         Text = $"Steam LZX Tray {AppInfo.Version}";
         Icon = icon;
         StartPosition = FormStartPosition.CenterScreen;
-        Size = new Size(980, 700);
-        MinimumSize = new Size(760, 520);
+        // Logical (96-dpi) sizes converted for the monitor's DPI; the status tab later grows/shrinks the height to fit.
+        Size = new Size(LogicalToDeviceUnits(720), LogicalToDeviceUnits(620));
+        MinimumSize = new Size(LogicalToDeviceUnits(520), LogicalToDeviceUnits(400));
         ShowInTaskbar = true;
 
-        var tabs = new TabControl { Dock = DockStyle.Fill };
-        tabs.TabPages.Add(BuildStatusTab());
+        var tabs = _tabs = new TabControl { Dock = DockStyle.Fill };
+        tabs.TabPages.Add(_statusPage = BuildStatusTab());
         tabs.TabPages.Add(BuildSettingsTab());
         var logTab = new TabPage("Log") { Padding = new Padding(6) };
         logTab.Controls.Add(_log);
@@ -127,46 +130,130 @@ internal sealed class MainForm : Form
         };
 
         _engine.LibrariesChanged += () => { if (IsHandleCreated) BeginInvoke(new Action(RefreshLibraries)); };
+        _libs.Resize += (_, _) => FitLibraryColumns();
+        _libs.HandleCreated += (_, _) => FitLibraryList();
+        DpiChanged += (_, _) => BeginInvoke(new Action(() => { ApplyDpiSizes(); FitLibraryList(); }));
+        ApplyDpiSizes();
         _timer.Tick += (_, _) => RefreshStatus();
         VisibleChanged += (_, _) =>
         {
-            if (Visible) { LoadSettingsToUi(); RefreshLibraries(); RefreshStatus(); _timer.Start(); }
+            if (Visible) { LoadSettingsToUi(); RefreshLibraries(); RefreshStatus(); _lastLibRows = -1; FitLibraryList(); _timer.Start(); }
             else _timer.Stop();
         };
     }
 
     private TabPage BuildStatusTab()
     {
-        var page = new TabPage("Status") { Padding = new Padding(8) };
-        var t = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 9 };
-        t.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-        t.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-        t.RowStyles.Add(new RowStyle(SizeType.Absolute, 22));
-        t.RowStyles.Add(new RowStyle(SizeType.Absolute, 22));
-        t.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-        t.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-        t.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-        t.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-        t.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
-        t.Controls.Add(_lblState);
-        t.Controls.Add(_lblWait);
-        t.Controls.Add(_lblCurrent);
-        t.Controls.Add(_lblFile);
-        t.Controls.Add(_lblStats);
-        t.Controls.Add(_lblMetrics);
-        t.Controls.Add(_lblVersion);
-        var buttons = new FlowLayoutPanel { AutoSize = true, Dock = DockStyle.Fill, Padding = new Padding(0, 6, 0, 6) };
+        var page = new TabPage("Status") { Padding = new Padding(8), UseVisualStyleBackColor = true };
+
+        // Two-column grid of short "Name: value" rows.
+        var grid = new TableLayoutPanel { Dock = DockStyle.Top, AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, ColumnCount = 2, Margin = new Padding(0) };
+        grid.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        grid.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        EllipsisLabel Row(string name, bool path = false, Color? color = null)
+        {
+            var n = new Label { Text = name, AutoSize = true, Anchor = AnchorStyles.Left, ForeColor = SystemColors.GrayText, Margin = new Padding(3, 1, 8, 1) };
+            var v = new EllipsisLabel(_tips, path);
+            if (color is Color c) v.ForeColor = c;
+            grid.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            grid.Controls.Add(n);
+            grid.Controls.Add(v);
+            return v;
+        }
+        grid.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        grid.Controls.Add(_lblState);
+        grid.SetColumnSpan(_lblState, 2);
+        _valWait = Row("Waiting for:", color: Color.DarkGoldenrod);
+        _valLibrary = Row("Library:", path: true);
+        _valGame = Row("Game / folder:");
+        _valFile = Row("File:", path: true);
+        _valNext = Row("Next scheduled pass:");
+        _valLast = Row("Last pass finished:");
+        _valQueued = Row("Queued Steam updates:");
+        _valGames = Row("Fully compressed:");
+        _valRun = Row("This pass:");
+        _valAllTime = Row("All time:");
+        _valSkip = Row("Skip list:");
+        _valCpu = Row("CPU (other apps):");
+        _valDriveOther = Row("Drive (other apps):");
+        _valDriveTotal = Row("Drive (total):");
+        _valVersion = Row("Version:");
+        _valUpdate = Row("Update check:");
+
+        var buttons = new FlowLayoutPanel { AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, Dock = DockStyle.Top, Padding = new Padding(0, 6, 0, 6), Margin = new Padding(0) };
         buttons.Controls.AddRange(new Control[] { _btnRun, _btnPause, _btnRescan, _btnClearSkip, _btnResetLog });
-        t.Controls.Add(buttons);
-        _libs.Columns.Add("Type", 70);
-        _libs.Columns.Add("Path", 330);
-        _libs.Columns.Add("FS", 60);
-        _libs.Columns.Add("Status", 230);
-        _libs.Columns.Add("Games / folders", 110);
-        _libs.Columns.Add("Compressed", 90);
-        t.Controls.Add(_libs);
-        page.Controls.Add(t);
+
+        var libsLabel = new Label { Text = "Libraries and folders", AutoSize = true, Font = new Font(Font, FontStyle.Bold), Margin = new Padding(3, 4, 3, 2) };
+
+        _libs.Columns.Add("Type");
+        _libs.Columns.Add("Path");
+        _libs.Columns.Add("FS");
+        _libs.Columns.Add("Status");
+        _libs.Margin = new Padding(3, 0, 3, 3);
+
+        // Outer layout: everything auto-sized from the top; a filler row takes leftover space.
+        var outer = _statusOuter = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 5, Margin = new Padding(0) };
+        outer.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        for (int i = 0; i < 4; i++) outer.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        outer.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+        outer.Controls.Add(grid, 0, 0);
+        outer.Controls.Add(buttons, 0, 1);
+        outer.Controls.Add(libsLabel, 0, 2);
+        outer.Controls.Add(_libs, 0, 3);
+        outer.Controls.Add(new Panel { Margin = new Padding(0), Height = 0 }, 0, 4);
+        page.Controls.Add(outer);
         return page;
+    }
+
+    /// <summary>Convert the few fixed pixel sizes from 96-dpi logical units for the current monitor DPI.</summary>
+    private void ApplyDpiSizes()
+    {
+        int S(int v) => LogicalToDeviceUnits(v);
+        _numCpu.Width = S(70); _numDrive.Width = S(70); _numMinKb.Width = S(90);
+        _dtDaily.Width = S(80); _numHours.Width = S(60); _txtExcluded.Width = S(140);
+        MinimumSize = new Size(S(520), S(400));
+    }
+
+    /// <summary>List height = header + rows (1..10) + border; scrollbar only beyond 10. Then fit the window height.</summary>
+    private void FitLibraryList()
+    {
+        int rows = Math.Clamp(_libs.Items.Count, 1, 10);
+        FitLibraryColumns(); // Path column fills the width, so there is no horizontal scrollbar to account for
+        int border = _libs.IsHandleCreated ? Math.Max(0, _libs.Height - _libs.ClientSize.Height) : SystemInformation.Border3DSize.Height * 2;
+        int h = ListViewMetrics.HeaderHeight(_libs) + rows * ListViewMetrics.RowHeight(_libs) + border + 1;
+        if (_libs.Height != h) _libs.Height = h;
+        FitLibraryColumns(); // vertical scrollbar (>10 rows) changes the client width
+        if (rows != _lastLibRows) { _lastLibRows = rows; FitWindowHeight(); }
+    }
+
+    /// <summary>Type/FS/Status sized to content; Path takes the remaining width (no horizontal scrollbar).</summary>
+    private void FitLibraryColumns()
+    {
+        if (_libs.Columns.Count < 4) return;
+        int pad = LogicalToDeviceUnits(14);
+        int W(string t) => TextRenderer.MeasureText(t, _libs.Font).Width + pad;
+        var items = _libs.Items.Cast<ListViewItem>().ToList();
+        int type = Math.Max(W("Custom"), W("Type"));
+        int fs = Math.Max(W("NTFS"), items.Select(i => W(i.SubItems[2].Text)).DefaultIfEmpty(0).Max());
+        int status = Math.Min(LogicalToDeviceUnits(260), Math.Max(W("Status"), items.Select(i => W(i.SubItems[3].Text)).DefaultIfEmpty(0).Max()));
+        int path = Math.Max(LogicalToDeviceUnits(120), _libs.ClientSize.Width - type - fs - status - 1);
+        _libs.BeginUpdate();
+        _libs.Columns[0].Width = type; _libs.Columns[1].Width = path; _libs.Columns[2].Width = fs; _libs.Columns[3].Width = status;
+        _libs.EndUpdate();
+    }
+
+    /// <summary>Make the window tall enough for the whole Status tab (within the screen's working area).</summary>
+    private void FitWindowHeight()
+    {
+        if (!IsHandleCreated || WindowState != FormWindowState.Normal || _statusOuter == null) return;
+        int content = _statusOuter.GetPreferredSize(new Size(_statusPage.ClientSize.Width - _statusPage.Padding.Horizontal, 0)).Height;
+        int chrome = _tabs.Height - _statusPage.Height + _statusPage.Padding.Vertical;
+        int wantClient = content + chrome;
+        int extra = Height - ClientSize.Height;
+        var work = Screen.FromControl(this).WorkingArea;
+        int wantHeight = Math.Min(work.Height, Math.Max(MinimumSize.Height, wantClient + extra));
+        if (Height != wantHeight) Height = wantHeight;
+        if (Bottom > work.Bottom) Top = Math.Max(work.Top, work.Bottom - Height);
     }
 
     private TabPage BuildSettingsTab()
@@ -192,15 +279,15 @@ internal sealed class MainForm : Form
         Row("Max CPU load (other processes):", Flow(_numCpu, Note("%")));
         Row("Max drive activity (other processes):", Flow(_numDrive, Note("MB/s on the drive being compressed (own I/O excluded)")));
         Row("Minimum file size:", Flow(_numMinKb, Note("KB (smaller files are skipped)")));
-        Row("Schedule:", Flow(_rbDaily, _dtDaily, new Label { Width = 16 }, _rbInterval, _numHours, Note("hours"), new Label { Width = 16 }, _rbManual));
+        Row("Schedule:", Flow(_rbDaily, _dtDaily, new Label { Width = LogicalToDeviceUnits(16) }, _rbInterval, _numHours, Note("hours"), new Label { Width = LogicalToDeviceUnits(16) }, _rbManual));
         Row("", _chkWatch);
         Row("", _chkFullscreen);
         Row("Excluded drives:", Flow(_txtExcluded, Note("comma separated drive letters, e.g. X:, Y:  (never touched; empty = none)")));
-        Row("", Flow(_chkAutoUpdate, new Label { Width = 16 }, _btnCheckUpdate));
+        Row("", Flow(_chkAutoUpdate, new Label { Width = LogicalToDeviceUnits(16) }, _btnCheckUpdate));
         Row("", _chkAutostart);
         Row("", _chkShortcut);
 
-        var customPanel = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, Height = 160, Margin = new Padding(0) };
+        var customPanel = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, Height = LogicalToDeviceUnits(160), Margin = new Padding(0) };
         customPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
         customPanel.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
         var cb = new FlowLayoutPanel { FlowDirection = FlowDirection.TopDown, AutoSize = true, Margin = new Padding(0) };
@@ -208,7 +295,7 @@ internal sealed class MainForm : Form
         customPanel.Controls.Add(_lstCustom, 0, 0);
         customPanel.Controls.Add(cb, 1, 0);
         Row("Custom folders (non-Steam):", customPanel);
-        Row("", Flow(_btnSave, new Label { Width = 40 }, _btnUninstall));
+        Row("", Flow(_btnSave, new Label { Width = LogicalToDeviceUnits(40) }, _btnUninstall));
         page.Controls.Add(t);
         return page;
     }
@@ -309,13 +396,12 @@ internal sealed class MainForm : Form
                 l.Path,
                 l.FileSystem,
                 l.Supported ? $"OK ({l.UnitCount} units, {l.CompletedCount} done)" : "Skipped: " + l.Status,
-                l.Supported ? l.UnitCount.ToString() : "-",
-                l.Supported ? $"{l.CompletedCount}/{l.UnitCount}" : "-",
-            });
-            if (!l.Supported) it.ForeColor = Color.Gray;
+            }) { ToolTipText = l.Path + Environment.NewLine + (l.Supported ? $"{l.CompletedCount} of {l.UnitCount} done" : l.Status) };
+            if (!l.Supported) it.ForeColor = SystemColors.GrayText;
             _libs.Items.Add(it);
         }
         _libs.EndUpdate();
+        FitLibraryList();
     }
 
     private void RefreshStatus()
@@ -323,23 +409,29 @@ internal sealed class MainForm : Form
         var st = _engine.GetStatus();
         _lblState.Text = st.Phase switch
         {
-            Phase.Working => $"Working ({st.Run} run)",
-            Phase.Waiting => $"Waiting for idle ({st.Run} run)",
+            Phase.Working => $"Working ({st.Run} pass)",
+            Phase.Waiting => $"Waiting for idle ({st.Run} pass)",
             Phase.Paused => "Paused",
             _ => "Idle",
         };
-        _lblWait.Text = st.Phase is Phase.Waiting or Phase.Paused && st.WaitReason.Length > 0 ? "Reason: " + st.WaitReason : "";
-        _lblCurrent.Text = st.Game.Length > 0 ? $"Library: {st.Library}    Game/folder: {st.Game}" : $"Next scheduled run: {st.NextSchedule}" +
-            (st.LastRunCompletedUtc is DateTime d ? $"    Last run finished: {d.ToLocalTime():g}" : "") +
-            (st.PendingTriggers > 0 ? $"    Queued Steam updates: {st.PendingTriggers}" : "");
-        _lblFile.Text = st.File.Length > 0 ? "File: " + st.File : "";
+        _valWait.Text = st.Phase is Phase.Waiting or Phase.Paused && st.WaitReason.Length > 0 ? st.WaitReason : "-";
+        _valLibrary.Text = st.Library.Length > 0 ? st.Library : "-";
+        _valGame.Text = st.Game.Length > 0 ? st.Game : "-";
+        _valFile.Text = st.File.Length > 0 ? st.File : "-";
+        _valNext.Text = st.NextSchedule;
+        _valLast.Text = st.LastRunCompletedUtc is DateTime d ? d.ToLocalTime().ToString("g") : "never";
+        _valQueued.Text = st.PendingTriggers.ToString("N0");
         var (done, total) = _engine.CompletedTotals();
-        _lblStats.Text = $"Games/folders fully compressed: {done:N0} / {total:N0}      This run: {st.RunFilesProcessed:N0} files checked, {st.RunFilesCompressed:N0} compressed, {Fmt.Bytes(st.RunBytesSaved)} saved      " +
-                         $"All time: {st.TotalFilesCompressed:N0} files, {Fmt.Bytes(st.TotalBytesSaved)} saved      Skip list: {st.SkipListCount:N0}";
-        _lblMetrics.Text = $"CPU (other processes): {st.CpuOther:0}%" + (st.DiskOtherMBps >= 0 ? $"    Drive (other processes): {st.DiskOtherMBps:0.0} MB/s" : "")
-            + (st.DiskTotalMBps >= 0 ? $"    Drive throughput (all): {st.DiskTotalMBps:0.0} MB/s" : "");
+        _valGames.Text = $"{done:N0} of {total:N0} games/folders";
+        _valRun.Text = $"{st.RunFilesProcessed:N0} checked, {st.RunFilesCompressed:N0} compressed, {Fmt.Bytes(st.RunBytesSaved)} saved";
+        _valAllTime.Text = $"{st.TotalFilesCompressed:N0} files, {Fmt.Bytes(st.TotalBytesSaved)} saved";
+        _valSkip.Text = $"{st.SkipListCount:N0} files";
+        _valCpu.Text = $"{st.CpuOther:0}%";
+        _valDriveOther.Text = st.DiskOtherMBps >= 0 ? $"{st.DiskOtherMBps:0.0} MB/s" : "-";
+        _valDriveTotal.Text = st.DiskTotalMBps >= 0 ? $"{st.DiskTotalMBps:0.0} MB/s" : "-";
+        _valVersion.Text = AppInfo.Version;
+        _valUpdate.Text = Updater?.LastResult ?? "-";
         _btnPause.Text = _engine.Paused ? "Resume" : "Pause";
-        _lblVersion.Text = $"Version {AppInfo.Version}    Last update check: {Updater?.LastResult ?? "-"}";
 
         if (Log.Version != _logVersion)
         {
