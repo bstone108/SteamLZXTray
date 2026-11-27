@@ -36,6 +36,8 @@ internal sealed class IdleMonitor : IDisposable
     public bool GameInForeground { get; private set; }
     public string GameReason { get; private set; } = "";
     public bool TreatFullscreenAsGame { get; set; } = true;
+    /// <summary>Session locked, on the logon/UAC secure desktop, or a screensaver running: the PC is not in use.</summary>
+    public bool LockedOrScreensaver { get; private set; }
 
     public IdleMonitor()
     {
@@ -213,7 +215,8 @@ internal sealed class IdleMonitor : IDisposable
     private (bool, string) DetectGame()
     {
         // Locked session, logon/UAC secure desktop or screensaver: idle, not a game.
-        if (IsLockedOrScreensaver()) return (false, "");
+        LockedOrScreensaver = IsLockedOrScreensaver();
+        if (LockedOrScreensaver) return (false, "");
 
         try
         {

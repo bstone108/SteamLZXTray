@@ -39,7 +39,7 @@ Get the latest build from **[Releases](https://github.com/bstone108/SteamLZXTray
   - **Timestamps are preserved**: the original created/accessed/modified times are written back after compressing.
 - **Idle gating**, checked before every file and samples every second:
   - CPU load from other processes, with this app's own CPU subtracted (default max 50%).
-  - No game in the foreground: Steam's `RunningAppID != 0`, or the foreground process's exe is inside a Steam library or custom folder, or (optional, on by default) any fullscreen app. The lock screen, sign-in/UAC screens, screensavers and Windows shell windows never count; a locked PC or running screensaver counts as idle.
+  - No game in the foreground: Steam's `RunningAppID != 0`, or the foreground process's exe is inside a Steam library or custom folder, or (optional, on by default) any fullscreen app. The lock screen, sign-in/UAC screens, screensavers and Windows shell windows never count; while the PC is locked or a screensaver is running, the CPU and drive limits are ignored and work runs (still at lowest priority).
   - Disk throughput from **other processes** on the drive being compressed (default max 50 MB/s, configurable). It's read from the PDH counter `\LogicalDisk(X:)\Disk Bytes/sec` (English counter names, so it works on any Windows language) minus this app's own I/O. Existing `DriveThresholdMBps` values in `settings.json` are kept.
   - After any wait, conditions must stay good for about 5 s before work resumes.
 - **Lowest priority**: the worker thread uses `THREAD_MODE_BACKGROUND_BEGIN` (very low I/O, low memory priority) plus `THREAD_PRIORITY_IDLE` plus EcoQoS (thread power throttling). Process I/O priority is set to Very Low. The UI thread stays normal.

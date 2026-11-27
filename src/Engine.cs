@@ -637,6 +637,9 @@ internal sealed class Engine : IDisposable
             AppSettings s = Settings;
             string reason = "";
             if (_paused) reason = "Paused";
+            // Locked session or screensaver: the PC isn't in use, so skip the CPU and drive checks and just run
+            // (our own background/idle CPU and I/O priority still apply).
+            else if (_monitor.LockedOrScreensaver) { SetPhase(Phase.Working, ""); return true; }
             else if (_monitor.GameInForeground) reason = _monitor.GameReason;
             else if (_monitor.OtherCpuSmoothed > s.CpuThresholdPercent) reason = $"CPU busy ({_monitor.OtherCpuSmoothed:0}%)";
             else
