@@ -250,7 +250,8 @@ internal sealed class MainForm : Form
     private TabPage BuildSettingsTab()
     {
         var page = new TabPage("Settings") { Padding = new Padding(10), AutoScroll = true };
-        var t = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, AutoSize = false };
+        // Dock Top + AutoSize so the page's AutoScroll can scroll to the bottom rows instead of clipping them.
+        var t = new TableLayoutPanel { Dock = DockStyle.Top, ColumnCount = 2, AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink };
         t.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
         t.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
 
@@ -266,6 +267,8 @@ internal sealed class MainForm : Form
             return f;
         }
         Label Note(string s) => new() { Text = s, AutoSize = true, ForeColor = Color.DimGray, Padding = new Padding(0, 6, 0, 0) };
+        // Hint on its own line under a control; fills the column and wraps instead of running past the edge.
+        Label WrapNote(string s) => new() { Text = s, AutoSize = true, Dock = DockStyle.Fill, ForeColor = Color.DimGray, Margin = new Padding(3, 0, 3, 3) };
 
         Row("Max CPU load (other processes):", Flow(_numCpu, Note("%")));
         Row("Max drive activity (other processes):", Flow(_numDrive, Note("MB/s on the drive being compressed (own I/O excluded)")));
@@ -273,12 +276,14 @@ internal sealed class MainForm : Form
         Row("Schedule:", Flow(_rbDaily, _dtDaily, new Label { Width = LogicalToDeviceUnits(16) }, _rbInterval, _numHours, Note("hours"), new Label { Width = LogicalToDeviceUnits(16) }, _rbManual));
         Row("", _chkWatch);
         Row("", _chkFullscreen);
-        Row("Excluded drives:", Flow(_txtExcluded, Note("comma separated drive letters, e.g. X:, Y:  (never touched; empty = none)")));
-        Row("", Flow(_chkAutoUpdate, new Label { Width = LogicalToDeviceUnits(16) }, _btnCheckUpdate));
+        Row("Excluded drives:", _txtExcluded);
+        Row("", WrapNote("comma separated drive letters, e.g. X:, Y:  (never touched; empty = none)"));
+        Row("", _chkAutoUpdate);
+        Row("", _btnCheckUpdate);
         Row("", _chkAutostart);
         Row("", _chkShortcut);
 
-        var customPanel = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, Height = LogicalToDeviceUnits(160), Margin = new Padding(0) };
+        var customPanel = new TableLayoutPanel { Anchor = AnchorStyles.Left | AnchorStyles.Right | AnchorStyles.Top, ColumnCount = 2, Height = LogicalToDeviceUnits(110), Margin = new Padding(0, 3, 0, 3) };
         customPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
         customPanel.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
         var cb = new FlowLayoutPanel { FlowDirection = FlowDirection.TopDown, AutoSize = true, Margin = new Padding(0) };
