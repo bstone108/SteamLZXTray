@@ -19,6 +19,7 @@ internal sealed class MainForm : Form
     private TabControl _tabs = null!;
     private TabPage _statusPage = null!;
     private int _lastLibRows = -1;
+    private bool _sizingLibCols;
     private readonly Button _btnRun = new() { Text = "Run Now", AutoSize = true };
     private readonly Button _btnPause = new() { Text = "Pause", AutoSize = true };
     private readonly Button _btnClearSkip = new() { Text = "Clear skip list", AutoSize = true };
@@ -185,12 +186,16 @@ internal sealed class MainForm : Form
         var libsLabel = new Label { Text = "Libraries and folders", AutoSize = true, Font = new Font(Font, FontStyle.Bold), Margin = new Padding(3, 4, 3, 2) };
 
         _libs.Columns.Add("Type", 70);
-        _libs.Columns.Add("Path", 330);
+        _libs.Columns.Add("Path", 200);
         _libs.Columns.Add("FS", 60);
-        _libs.Columns.Add("Status", 230);
         _libs.Columns.Add("Games / folders", 110);
         _libs.Columns.Add("Compressed", 90);
         _libs.Margin = new Padding(3, 0, 3, 3);
+        _libs.SizeChanged += (_, _) =>
+        {
+            try { SizeLibraryColumns(); }
+            catch (Exception ex) { Log.Write("Library column sizing failed: " + ex.Message); }
+        };
 
         // Outer layout: everything auto-sized from the top; a filler row takes leftover space.
         var outer = _statusOuter = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 5, Margin = new Padding(0) };
@@ -216,21 +221,66 @@ internal sealed class MainForm : Form
     }
 
     /// <summary>
-    /// List height = header + rows (1..5) + border (+ horizontal scrollbar if the columns are wider than the list);
-    /// a vertical scrollbar appears beyond 5 rows. Then fit the window height.
+    /// List height = header + rows (1..5) + border; a vertical scrollbar appears beyond 5 rows.
+    /// Columns are sized so Path fills leftover width and a horizontal scrollbar never appears.
+    /// Then fit the window height.
     /// Only called once the list's handle exists and its items are in place (never from HandleCreated:
     /// querying item rectangles there throws and aborts ListView's own column/item setup).
     /// </summary>
     private void FitLibraryList()
     {
+        SizeLibraryColumns();
         int rows = Math.Clamp(_libs.Items.Count, 1, MaxLibraryRows);
         int border = LogicalToDeviceUnits(2) * 2; // Fixed3D frame, top + bottom (independent of scrollbars)
-        int vScroll = _libs.Items.Count > MaxLibraryRows ? SystemInformation.VerticalScrollBarWidth : 0;
-        int colsWidth = _libs.Columns.Cast<ColumnHeader>().Sum(c => c.Width);
-        int hScroll = colsWidth > _libs.Width - border - vScroll ? SystemInformation.HorizontalScrollBarHeight : 0;
-        int h = ListViewMetrics.HeaderHeight(_libs) + rows * ListViewMetrics.RowHeight(_libs) + border + hScroll + 1;
+        int h = ListViewMetrics.HeaderHeight(_libs) + rows * ListViewMetrics.RowHeight(_libs) + border + 1;
         if (_libs.Height != h) _libs.Height = h;
+        SizeLibraryColumns(); // again after the height change, in case the vertical scrollbar appeared
         if (rows != _lastLibRows) { _lastLibRows = rows; FitWindowHeight(); }
+    }
+
+    /// <summary>
+    /// Type, FS, Games / folders and Compressed get widths that fit their header and content;
+    /// Path takes the rest (and shrinks on resize). Long paths show an ellipsis.
+    /// </summary>
+    private void SizeLibraryColumns()
+    {
+        if (_sizingLibCols || !_libs.IsHandleCreated || _libs.Columns.Count < 5 || _libs.ClientSize.Width <= 0)
+            return;
+        _sizingLibCols = true;
+        try
+        {
+            const TextFormatFlags flags = TextFormatFlags.SingleLine | TextFormatFlags.NoPrefix | TextFormatFlags.NoPadding;
+            int pad = LogicalToDeviceUnits(20);
+            int Measure(int index, params string[] extras)
+            {
+                int w = TextRenderer.MeasureText(_libs.Columns[index].Text, _libs.Font, Size.Empty, flags).Width + pad;
+                foreach (string s in extras)
+                    w = Math.Max(w, TextRenderer.MeasureText(s, _libs.Font, Size.Empty, flags).Width + pad);
+                foreach (ListViewItem item in _libs.Items)
+                    w = Math.Max(w, TextRenderer.MeasureText(item.SubItems[index].Text, _libs.Font, Size.Empty, flags).Width + pad);
+                return w;
+            }
+
+            int typeW = Measure(0, "Steam", "Custom");
+            int fsW = Measure(2, "NTFS");
+            int gamesW = Measure(3);
+            int compW = Measure(4);
+            // ListView scrollbars sit inside ClientSize, so reserve the vertical bar when it will show.
+            int vScroll = _libs.Items.Count > MaxLibraryRows ? SystemInformation.VerticalScrollBarWidth : 0;
+            int pathW = _libs.ClientSize.Width - (typeW + fsW + gamesW + compW) - vScroll - 2;
+            pathW = Math.Max(pathW, LogicalToDeviceUnits(40));
+
+            void Set(int i, int w)
+            {
+                if (_libs.Columns[i].Width != w) _libs.Columns[i].Width = w;
+            }
+            Set(0, typeW);
+            Set(1, pathW);
+            Set(2, fsW);
+            Set(3, gamesW);
+            Set(4, compW);
+        }
+        finally { _sizingLibCols = false; }
     }
 
     /// <summary>Make the window tall enough for the whole Status tab (within the screen's working area).</summary>
@@ -391,9 +441,8 @@ internal sealed class MainForm : Form
                 l.Kind == LibraryKind.Steam ? "Steam" : "Custom",
                 l.Path,
                 l.FileSystem,
-                l.Supported ? $"OK ({l.UnitCount} units, {l.CompletedCount} done)" : "Skipped: " + l.Status,
                 l.Supported ? l.UnitCount.ToString() : "-",
-                l.Supported ? $"{l.CompletedCount}/{l.UnitCount}" : "-",
+                l.Supported ? l.CompletedCount.ToString() : "-",
             });
             if (!l.Supported) it.ForeColor = Color.Gray;
             _libs.Items.Add(it);
