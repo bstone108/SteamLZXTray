@@ -82,7 +82,7 @@ internal sealed class VdfNode
 
 internal sealed class AcfInfo
 {
-    public string AppId = "", Name = "", InstallDir = "", BuildId = "";
+    public string AppId = "", Name = "", InstallDir = "", BuildId = "", LastUpdated = "", SizeOnDisk = "";
     public int StateFlags;
     public string ManifestPath = "";
 
@@ -103,6 +103,8 @@ internal sealed class AcfInfo
                 Name = app.Str("name") ?? "",
                 InstallDir = app.Str("installdir") ?? "",
                 BuildId = app.Str("buildid") ?? "",
+                LastUpdated = app.Str("LastUpdated") ?? "",
+                SizeOnDisk = app.Str("SizeOnDisk") ?? "",
                 ManifestPath = path,
             };
             int.TryParse(app.Str("StateFlags"), out a.StateFlags);
@@ -291,4 +293,22 @@ internal static class LibraryDiscovery
     }
 
     public static string SteamKey(string libPath, string appId) => libPath + "|" + appId;
+
+    /// <summary>Every readable appmanifest in supported Steam libraries, including games not fully installed.</summary>
+    public static List<(string Key, AcfInfo Acf)> ReadSupportedSteamAcfs(List<LibraryInfo> libs)
+    {
+        var list = new List<(string, AcfInfo)>();
+        foreach (var lib in libs.Where(l => l.Kind == LibraryKind.Steam && l.Supported && Directory.Exists(l.SteamAppsDir)))
+        {
+            List<string> manifests;
+            try { manifests = Directory.EnumerateFiles(lib.SteamAppsDir, "appmanifest_*.acf").ToList(); }
+            catch (Exception ex) { Log.Write($"Cannot list manifests in {lib.SteamAppsDir}: {ex.Message}"); continue; }
+            foreach (var path in manifests)
+            {
+                var a = AcfInfo.Read(path);
+                if (a != null) list.Add((SteamKey(lib.Path, a.AppId), a));
+            }
+        }
+        return list;
+    }
 }

@@ -134,9 +134,45 @@ internal sealed class RunState
     public long RunBytesSaved { get; set; }
     public long RunFilesProcessed { get; set; }
     public long RunFilesCompressed { get; set; }
+    /// <summary>True if PassStartSnapshot was taken when this pass began (or when a legacy pass was restarted).</summary>
+    public bool HasPassStartSnapshot { get; set; }
+    /// <summary>Every Steam game's ACF fingerprint at the start of the current pass. Reused on resume; never retaken mid-pass.</summary>
+    public Dictionary<string, PassGameSnapshot> PassStartSnapshot { get; set; } = new(StringComparer.OrdinalIgnoreCase);
 
-    public static RunState Load(Action<string>? log) => AtomicJson.Load(AppPaths.State, () => new RunState(), log);
+    public static RunState Load(Action<string>? log)
+    {
+        var s = AtomicJson.Load(AppPaths.State, () => new RunState(), log);
+        s.PassStartSnapshot = new Dictionary<string, PassGameSnapshot>(s.PassStartSnapshot ?? new(), StringComparer.OrdinalIgnoreCase);
+        s.PendingTriggerKeys ??= new();
+        s.TriggeredUnitKeys ??= new();
+        return s;
+    }
     public void Save() => AtomicJson.Save(AppPaths.State, this);
+}
+
+/// <summary>Install-state fingerprint of one Steam game, captured at pass start for end-of-pass comparison.</summary>
+internal sealed class PassGameSnapshot
+{
+    public string Name { get; set; } = "";
+    public string BuildId { get; set; } = "";
+    public string LastUpdated { get; set; } = "";
+    public string SizeOnDisk { get; set; } = "";
+    public int StateFlags { get; set; }
+
+    public static PassGameSnapshot FromAcf(AcfInfo a) => new()
+    {
+        Name = a.Name,
+        BuildId = a.BuildId,
+        LastUpdated = a.LastUpdated,
+        SizeOnDisk = a.SizeOnDisk,
+        StateFlags = a.StateFlags,
+    };
+
+    public bool SameAs(PassGameSnapshot other) =>
+        BuildId == other.BuildId
+        && LastUpdated == other.LastUpdated
+        && SizeOnDisk == other.SizeOnDisk
+        && StateFlags == other.StateFlags;
 }
 
 internal sealed class GameLogEntry

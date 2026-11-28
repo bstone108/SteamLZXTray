@@ -49,8 +49,15 @@ internal sealed class Engine : IDisposable
         _monitor.TreatFullscreenAsGame = settings.TreatFullscreenAsGame;
         _debounceTimer = new System.Threading.Timer(_ => ProcessDebouncedManifests(), null, Timeout.Infinite, Timeout.Infinite);
         if (_state.ActiveRun != RunKind.None)
-            Log.Write($"Pass in progress ({_state.ActiveRun}) found in state; resuming immediately at '{_state.CurrentUnitKey}' after '{_state.LastCompletedRelPath}'" +
-                      (_state.PendingTriggerKeys.Count > 0 ? $"; {_state.PendingTriggerKeys.Count} Steam update(s) queued" : "") + ".");
+        {
+            if (!_state.HasPassStartSnapshot)
+                Log.Write($"Pass in progress ({_state.ActiveRun}) found in state with no start snapshot; it will be started over with a fresh snapshot" +
+                          (_state.PendingTriggerKeys.Count > 0 ? $"; {_state.PendingTriggerKeys.Count} Steam update(s) queued" : "") + ".");
+            else
+                Log.Write($"Pass in progress ({_state.ActiveRun}) found in state; resuming immediately at '{_state.CurrentUnitKey}' after '{_state.LastCompletedRelPath}'" +
+                          (_state.PendingTriggerKeys.Count > 0 ? $"; {_state.PendingTriggerKeys.Count} Steam update(s) queued" : "") +
+                          $"; reusing start snapshot of {_state.PassStartSnapshot.Count} game(s).");
+        }
         _worker = new Thread(WorkerMain) { IsBackground = true, Name = "LZXWorker" };
     }
 
@@ -189,6 +196,9 @@ internal sealed class Engine : IDisposable
             string key = LibraryDiscovery.SteamKey(libPath, acf.AppId);
             lock (_lock)
             {
+                // During a pass, games that existed at pass start are left for the end-of-pass snapshot compare.
+                if (_state.ActiveRun != RunKind.None && _state.HasPassStartSnapshot && _state.PassStartSnapshot.ContainsKey(key))
+                    continue;
                 if (_gameLog.Steam.TryGetValue(key, out var e) && e.BuildId == acf.BuildId) continue;
                 if (_state.PendingTriggerKeys.Contains(key, StringComparer.OrdinalIgnoreCase)) continue;
                 _state.PendingTriggerKeys.Add(key);
@@ -254,6 +264,7 @@ internal sealed class Engine : IDisposable
 
     private void StartRun(RunKind kind, List<string>? keys)
     {
+        var snapshot = CaptureSteamSnapshot(Settings);
         lock (_lock)
         {
             _state.ActiveRun = kind;
@@ -263,10 +274,22 @@ internal sealed class Engine : IDisposable
             _state.CurrentUnitIncomplete = false;
             _state.TriggeredUnitKeys = keys ?? new List<string>();
             _state.RunBytesSaved = 0; _state.RunFilesProcessed = 0; _state.RunFilesCompressed = 0;
+            _state.PassStartSnapshot = snapshot;
+            _state.HasPassStartSnapshot = true;
             if (kind == RunKind.Scheduled) _state.LastScheduledRunUtc = DateTime.UtcNow;
             _state.Save();
         }
         Log.Write($"{kind} run started" + (keys != null ? $" ({keys.Count} queued game(s))" : "") + ".");
+        Log.Write($"Pass snapshot: {snapshot.Count} game(s).");
+    }
+
+    /// <summary>Fingerprint every Steam game in supported libraries (including ones not fully installed).</summary>
+    private static Dictionary<string, PassGameSnapshot> CaptureSteamSnapshot(AppSettings settings)
+    {
+        var snap = new Dictionary<string, PassGameSnapshot>(StringComparer.OrdinalIgnoreCase);
+        foreach (var (key, acf) in LibraryDiscovery.ReadSupportedSteamAcfs(LibraryDiscovery.Discover(settings)))
+            snap[key] = PassGameSnapshot.FromAcf(acf);
+        return snap;
     }
 
     private bool ScheduleDue()
@@ -313,6 +336,9 @@ internal sealed class Engine : IDisposable
 
     private void ExecuteRun()
     {
+        if (!_state.HasPassStartSnapshot)
+            RestartPassWithoutSnapshot();
+
         var settings = Settings;
         var libs = LibraryDiscovery.Discover(settings);
         var units = LibraryDiscovery.BuildUnits(libs);
@@ -348,7 +374,9 @@ internal sealed class Engine : IDisposable
             var u = units[i];
             bool resuming = i == start && resumeRel != null;
 
-            if (kind != RunKind.Manual && !resuming && IsUnitCompleteVerified(u))
+            // Triggered runs walk every queued game, even if the buildid in the game log already matches
+            // (a verify/repair can rewrite files uncompressed without changing buildid).
+            if (kind == RunKind.Scheduled && !resuming && IsUnitCompleteVerified(u))
                 continue;
 
             lock (_lock)
@@ -367,6 +395,8 @@ internal sealed class Engine : IDisposable
             else Log.Write($"{u.DisplayName}: some files were in use; will retry next pass.");
         }
 
+        QueueSnapshotChanges();
+
         lock (_lock)
         {
             Log.Write($"{kind} run finished: {_state.RunFilesProcessed} files checked, {_state.RunFilesCompressed} compressed, {Fmt.Bytes(_state.RunBytesSaved)} saved.");
@@ -374,12 +404,81 @@ internal sealed class Engine : IDisposable
             _state.CurrentUnitKey = null;
             _state.LastCompletedRelPath = null;
             _state.TriggeredUnitKeys.Clear();
+            _state.PassStartSnapshot.Clear();
+            _state.HasPassStartSnapshot = false;
             _state.LastRunCompletedUtc = DateTime.UtcNow;
             _state.Save();
             _curLib = _curGame = _curFile = ""; _curVolume = "";
         }
         // Refresh completion counts for the UI.
         RefreshLibraries();
+    }
+
+    /// <summary>
+    /// A resumed pass from an older build (or any state without a start snapshot) is started over once,
+    /// with a fresh snapshot. Already-compressed files are skipped quickly.
+    /// </summary>
+    private void RestartPassWithoutSnapshot()
+    {
+        Log.Write("Resuming a pass with no saved start snapshot; starting the pass over and taking a fresh snapshot.");
+        var snapshot = CaptureSteamSnapshot(Settings);
+        lock (_lock)
+        {
+            _state.CurrentUnitKey = null;
+            _state.LastCompletedRelPath = null;
+            _state.CurrentUnitIncomplete = false;
+            _state.RunBytesSaved = 0;
+            _state.RunFilesProcessed = 0;
+            _state.RunFilesCompressed = 0;
+            _state.RunStartedUtc = DateTime.UtcNow;
+            _state.PassStartSnapshot = snapshot;
+            _state.HasPassStartSnapshot = true;
+            _state.Save();
+        }
+        Log.Write($"Pass snapshot: {snapshot.Count} game(s).");
+    }
+
+    /// <summary>
+    /// After a finished pass, compare current ACF state to the pass-start snapshot and queue
+    /// games that changed or were installed mid-pass. Still-updating games (StateFlags != 4)
+    /// are left for the live watcher to pick up when they finish.
+    /// </summary>
+    private void QueueSnapshotChanges()
+    {
+        if (!_state.HasPassStartSnapshot) return;
+        if (!Settings.WatchSteamUpdates)
+        {
+            Log.Write("Pass snapshot compare skipped (Watch for Steam updates is off).");
+            return;
+        }
+
+        var current = CaptureSteamSnapshot(Settings);
+        Dictionary<string, PassGameSnapshot> start;
+        lock (_lock) start = new Dictionary<string, PassGameSnapshot>(_state.PassStartSnapshot, StringComparer.OrdinalIgnoreCase);
+
+        var queued = new List<string>();
+        foreach (var (key, now) in current)
+        {
+            if (now.StateFlags != 4) continue; // still updating; the watcher will queue when it finishes
+            if (start.TryGetValue(key, out var then) && then.SameAs(now)) continue;
+            lock (_lock)
+            {
+                if (_state.PendingTriggerKeys.Contains(key, StringComparer.OrdinalIgnoreCase)) continue;
+                _state.PendingTriggerKeys.Add(key);
+            }
+            string why = start.ContainsKey(key) ? "changed during the pass" : "installed during the pass";
+            string label = string.IsNullOrEmpty(now.Name) ? key : now.Name;
+            Log.Write($"Pass snapshot: {label} (build {now.BuildId}) {why}; queued.");
+            queued.Add(label);
+        }
+
+        if (queued.Count > 0)
+        {
+            lock (_lock) _state.Save();
+            Log.Write($"Pass snapshot compare: {queued.Count} game(s) queued for another pass: {string.Join(", ", queued)}.");
+        }
+        else
+            Log.Write("Pass snapshot compare: no games changed during the pass.");
     }
 
     // ------------------------------------------------------------------ completion tracking
