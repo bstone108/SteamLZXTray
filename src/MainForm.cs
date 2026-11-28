@@ -382,8 +382,7 @@ internal sealed class MainForm : Form
             _rbDaily.Checked = s.ScheduleMode == ScheduleMode.Daily;
             _rbInterval.Checked = s.ScheduleMode == ScheduleMode.Interval;
             _rbManual.Checked = s.ScheduleMode == ScheduleMode.ManualOnly;
-            if (!TimeSpan.TryParse(s.DailyTime, out var tod)) tod = TimeSpan.FromHours(3);
-            _dtDaily.Value = DateTime.Today + tod;
+            _dtDaily.Value = DateTime.Today + s.DailyTimeOfDay();
             _numHours.Value = Math.Clamp(s.IntervalHours, 1, 720);
             _chkWatch.Checked = s.WatchSteamUpdates;
             _chkFullscreen.Checked = s.TreatFullscreenAsGame;

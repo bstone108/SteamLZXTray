@@ -1,0 +1,20 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- Dependency-free checks for the pure (non-Windows) source files: state/settings file compatibility, VDF parsing,
+       formatting. Run with: dotnet run (project tests/SteamLZXTray.Tests) -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="../../src/AppSettings.cs" Link="src/AppSettings.cs" />
+    <Compile Include="../../src/AtomicJson.cs" Link="src/AtomicJson.cs" />
+    <Compile Include="../../src/Fmt.cs" Link="src/Fmt.cs" />
+    <Compile Include="../../src/GameLog.cs" Link="src/GameLog.cs" />
+    <Compile Include="../../src/Log.cs" Link="src/Log.cs" />
+    <Compile Include="../../src/RunState.cs" Link="src/RunState.cs" />
+    <Compile Include="../../src/Vdf.cs" Link="src/Vdf.cs" />
+  </ItemGroup>
+</Project>

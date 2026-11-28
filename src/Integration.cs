@@ -1,4 +1,5 @@
 using System.Reflection;
+using System.Runtime.InteropServices;
 using Microsoft.Win32;
 
 namespace SteamLZXTray;
@@ -64,9 +65,9 @@ internal static class Integration
             lt.InvokeMember("IconLocation", BindingFlags.SetProperty, null, lnk, new object[] { ExePath + ",0" });
             lt.InvokeMember("Description", BindingFlags.SetProperty, null, lnk, new object[] { "Steam LZX Tray - background WOF LZX compression" });
             lt.InvokeMember("Save", BindingFlags.InvokeMethod, null, lnk, null);
-            System.Runtime.InteropServices.Marshal.FinalReleaseComObject(lnk);
+            Marshal.FinalReleaseComObject(lnk);
         }
-        finally { System.Runtime.InteropServices.Marshal.FinalReleaseComObject(shell); }
+        finally { Marshal.FinalReleaseComObject(shell); }
         Log.Write($"Start Menu shortcut written: {ShortcutPath}");
     }
 

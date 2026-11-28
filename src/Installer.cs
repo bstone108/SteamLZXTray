@@ -120,8 +120,8 @@ internal static class Installer
         var nextNote = DateTime.UtcNow.AddSeconds(3);
         while (DateTime.UtcNow < deadline)
         {
-            if (FindInstances(installedOnly: false).Count == 0) return;
-            if (!signalled && FindInstances(installedOnly: true).Count == 0) break; // only foreign copies; nothing to wait for
+            if (CountInstances(installedOnly: false) == 0) return;
+            if (!signalled && CountInstances(installedOnly: true) == 0) break; // only foreign copies; nothing to wait for
             if (signalled && DateTime.UtcNow >= nextNote)
             {
                 Log.Write("Installer: waiting for old copy to finish current file...");
@@ -190,6 +190,14 @@ internal static class Installer
             else p.Dispose();
         }
         return result;
+    }
+
+    /// <summary>Like <see cref="FindInstances"/> but only counts, disposing every process handle.</summary>
+    private static int CountInstances(bool installedOnly)
+    {
+        var found = FindInstances(installedOnly);
+        foreach (var p in found) p.Dispose();
+        return found.Count;
     }
 
     private static string? SafePath(Process p)

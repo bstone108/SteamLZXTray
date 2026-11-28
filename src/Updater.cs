@@ -285,6 +285,7 @@ internal sealed class Updater : IDisposable
         NetworkChange.NetworkAvailabilityChanged -= OnNetworkAvailabilityChanged;
         try { _cts.Cancel(); } catch { }
         _timer.Dispose();
-        _busy.Dispose();
+        // _busy is deliberately not disposed: a check still in flight releases it in its finally block, and
+        // releasing a disposed SemaphoreSlim throws. It holds no OS handle unless AvailableWaitHandle is used.
     }
 }

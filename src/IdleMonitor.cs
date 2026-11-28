@@ -1,3 +1,5 @@
+using System.Diagnostics;
+using System.Runtime.InteropServices;
 using System.Text;
 using Microsoft.Win32;
 
@@ -24,17 +26,20 @@ internal sealed class IdleMonitor : IDisposable
     private long _attributedBytes; // bytes we know we read/wrote (WOF writes may not show in process counters)
     private DateTime _lastSample = DateTime.UtcNow;
 
-    private string[] _gameRoots = Array.Empty<string>();
+    private volatile string[] _gameRoots = Array.Empty<string>();
     private readonly int _ownPid = Environment.ProcessId;
 
-    public double CpuPercent { get; private set; }
+    private double _cpuPercent;
+    private double _ownIoBytesPerSec;
+    private TimeSpan _lastOwnCpu = Process.GetCurrentProcess().TotalProcessorTime;
+    private readonly Dictionary<string, double> _diskSmoothed = new(StringComparer.OrdinalIgnoreCase);
+    // One field for "is a game in front" and "why", so readers never see one without the other.
+    private volatile string _gameReason = "";
+
     /// <summary>System CPU minus this process's CPU, smoothed (EMA ~4 s).</summary>
     public double OtherCpuSmoothed { get; private set; }
-    private TimeSpan _lastOwnCpu = System.Diagnostics.Process.GetCurrentProcess().TotalProcessorTime;
-    private readonly Dictionary<string, double> _diskSmoothed = new(StringComparer.OrdinalIgnoreCase);
-    public double OwnIoBytesPerSec { get; private set; }
-    public bool GameInForeground { get; private set; }
-    public string GameReason { get; private set; } = "";
+    /// <summary>Why a game counts as in the foreground; empty when none is.</summary>
+    public string GameReason => _gameReason;
     public bool TreatFullscreenAsGame { get; set; } = true;
     /// <summary>Session locked, on the logon/UAC secure desktop, or a screensaver running: the PC is not in use.</summary>
     public bool LockedOrScreensaver { get; private set; }
@@ -106,14 +111,14 @@ internal sealed class IdleMonitor : IDisposable
             long di = idle - _lastIdle, dk = kernel - _lastKernel, du = user - _lastUser;
             _lastIdle = idle; _lastKernel = kernel; _lastUser = user;
             long total = dk + du;
-            if (total > 0) CpuPercent = Math.Clamp(100.0 * (total - di) / total, 0, 100);
+            if (total > 0) _cpuPercent = Math.Clamp(100.0 * (total - di) / total, 0, 100);
         }
-        using (var me = System.Diagnostics.Process.GetCurrentProcess())
+        using (var me = Process.GetCurrentProcess())
         {
             var own = me.TotalProcessorTime;
             double ownPct = 100.0 * (own - _lastOwnCpu).TotalSeconds / (secs * Environment.ProcessorCount);
             _lastOwnCpu = own;
-            double other = Math.Max(0, CpuPercent - ownPct);
+            double other = Math.Max(0, _cpuPercent - ownPct);
             OtherCpuSmoothed = OtherCpuSmoothed * 0.75 + other * 0.25;
         }
 
@@ -126,7 +131,7 @@ internal sealed class IdleMonitor : IDisposable
             long attr = Interlocked.Read(ref _attributedBytes);
             double attrRate = (attr - _lastAttributed) / secs;
             _lastAttributed = attr;
-            OwnIoBytesPerSec = Math.Max(procRate, attrRate);
+            _ownIoBytesPerSec = Math.Max(procRate, attrRate);
         }
 
         // Disk counters
@@ -143,7 +148,7 @@ internal sealed class IdleMonitor : IDisposable
             }
             if (Native.PdhCollectQueryData(_query) == 0)
             {
-                double own = OwnIoBytesPerSec;
+                double own = _ownIoBytesPerSec;
                 lock (_lock)
                     foreach (var kv in _diskCounters)
                     {
@@ -161,7 +166,7 @@ internal sealed class IdleMonitor : IDisposable
         }
 
         // Foreground game
-        (GameInForeground, GameReason) = DetectGame();
+        _gameReason = DetectGame();
     }
 
     // Normal Windows functions that must never count as a foreground game (lock screen, logon/UAC,
@@ -205,43 +210,44 @@ internal sealed class IdleMonitor : IDisposable
         string? name = image != null ? Path.GetFileName(image) : null;
         if (name == null)
         {
-            try { using var p = System.Diagnostics.Process.GetProcessById((int)pid); name = p.ProcessName + ".exe"; }
+            try { using var p = Process.GetProcessById((int)pid); name = p.ProcessName + ".exe"; }
             catch { return false; }
         }
         if (name.EndsWith(".scr", StringComparison.OrdinalIgnoreCase)) return true; // screensavers
         return SystemForegroundProcesses.Contains(Path.GetFileNameWithoutExtension(name));
     }
 
-    private (bool, string) DetectGame()
+    /// <summary>Returns why a game counts as in the foreground, or "" when none does.</summary>
+    private string DetectGame()
     {
         // Locked session, logon/UAC secure desktop or screensaver: idle, not a game.
         LockedOrScreensaver = IsLockedOrScreensaver();
-        if (LockedOrScreensaver) return (false, "");
+        if (LockedOrScreensaver) return "";
 
         try
         {
             using var k = Registry.CurrentUser.OpenSubKey(@"Software\Valve\Steam");
-            if (k?.GetValue("RunningAppID") is int id && id != 0) return (true, $"Steam game running (AppID {id})");
+            if (k?.GetValue("RunningAppID") is int id && id != 0) return $"Steam game running (AppID {id})";
         }
         catch { }
 
         IntPtr hwnd = Native.GetForegroundWindow();
-        if (hwnd == IntPtr.Zero) return (false, "");
+        if (hwnd == IntPtr.Zero) return "";
         Native.GetWindowThreadProcessId(hwnd, out uint pid);
-        if (pid == 0 || pid == _ownPid) return (false, "");
+        if (pid == 0 || pid == _ownPid) return "";
 
         string? image = ProcessImage(pid);
-        if (IsSystemForegroundProcess(pid, image)) return (false, "");
+        if (IsSystemForegroundProcess(pid, image)) return "";
         if (image != null)
         {
             foreach (var root in _gameRoots)
                 if (image.StartsWith(root, StringComparison.OrdinalIgnoreCase))
-                    return (true, "Game in foreground: " + Path.GetFileName(image));
+                    return "Game in foreground: " + Path.GetFileName(image);
         }
 
         if (TreatFullscreenAsGame && IsFullscreen(hwnd))
-            return (true, "Fullscreen app in foreground" + (image != null ? ": " + Path.GetFileName(image) : ""));
-        return (false, "");
+            return "Fullscreen app in foreground" + (image != null ? ": " + Path.GetFileName(image) : "");
+        return "";
     }
 
     private static string? ProcessImage(uint pid)
@@ -265,7 +271,7 @@ internal sealed class IdleMonitor : IDisposable
         if (c is "Progman" or "WorkerW" or "Shell_TrayWnd" or "Shell_SecondaryTrayWnd") return false;
         if (!Native.GetWindowRect(hwnd, out var wr)) return false;
         IntPtr mon = Native.MonitorFromWindow(hwnd, Native.MONITOR_DEFAULTTONEAREST);
-        var mi = new Native.MONITORINFO { cbSize = (uint)System.Runtime.InteropServices.Marshal.SizeOf<Native.MONITORINFO>() };
+        var mi = new Native.MONITORINFO { cbSize = (uint)Marshal.SizeOf<Native.MONITORINFO>() };
         if (mon == IntPtr.Zero || !Native.GetMonitorInfoW(mon, ref mi)) return false;
         return wr.Left <= mi.rcMonitor.Left && wr.Top <= mi.rcMonitor.Top &&
                wr.Right >= mi.rcMonitor.Right && wr.Bottom >= mi.rcMonitor.Bottom;
@@ -274,7 +280,11 @@ internal sealed class IdleMonitor : IDisposable
     public void Dispose()
     {
         _stop = true;
-        _thread.Join(3000);
-        if (_query != IntPtr.Zero) { Native.PdhCloseQuery(_query); _query = IntPtr.Zero; }
+        // Close PDH only once the sampler has stopped; closing it mid-sample would be a use-after-free.
+        if (_thread.Join(3000) && _query != IntPtr.Zero)
+        {
+            Native.PdhCloseQuery(_query);
+            _query = IntPtr.Zero;
+        }
     }
 }

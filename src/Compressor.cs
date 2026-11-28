@@ -3,7 +3,7 @@ using Microsoft.Win32.SafeHandles;
 
 namespace SteamLZXTray;
 
-internal enum CompressResult { Compressed, AlreadyCompressed, InUse, NotBeneficial, Failed, Retryable, Gone }
+internal enum CompressResult { Compressed, InUse, NotBeneficial, Failed, Retryable, Gone }
 
 internal readonly struct FileEntry
 {

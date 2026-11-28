@@ -101,5 +101,11 @@ Requires the .NET 8 SDK (it builds on Windows or Linux; `EnableWindowsTargeting`
 dotnet publish src/SteamLZXTray.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -o publish
 ```
 
+Quick checks for state/settings file compatibility, the VDF parser and formatting (plain console app, no packages, runs on Linux too):
+
+```
+dotnet run --project tests/SteamLZXTray.Tests
+```
+
 ## License
 MIT. See [LICENSE](LICENSE).

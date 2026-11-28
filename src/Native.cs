@@ -19,20 +19,16 @@ internal static class Native
     public const int ERROR_NO_MORE_FILES = 18;
     public const int ERROR_DISK_FULL = 112;
     public const int ERROR_USER_MAPPED_FILE = 1224;
-    public const int ERROR_OBJECT_NOT_EXTERNALLY_BACKED = 342;
     public const int ERROR_COMPRESSION_NOT_BENEFICIAL = 344;
 
     // ---- File access / attributes ----
     public const uint GENERIC_READ = 0x80000000;
     public const uint GENERIC_WRITE = 0x40000000;
     public const uint FILE_WRITE_ATTRIBUTES = 0x0100;
-    public const uint FILE_READ_ATTRIBUTES = 0x0080;
     public const uint FILE_SHARE_NONE = 0;
     public const uint OPEN_EXISTING = 3;
     public const uint FILE_FLAG_SEQUENTIAL_SCAN = 0x08000000;
-    public const uint FILE_FLAG_OPEN_REPARSE_POINT = 0x00200000;
 
-    public const uint FILE_ATTRIBUTE_READONLY = 0x1;
     public const uint FILE_ATTRIBUTE_DIRECTORY = 0x10;
     public const uint FILE_ATTRIBUTE_COMPRESSED = 0x800;
     public const uint FILE_ATTRIBUTE_OFFLINE = 0x1000;
@@ -51,12 +47,10 @@ internal static class Native
     // ---- WOF ----
     // CTL_CODE(FILE_DEVICE_FILE_SYSTEM=9, fn, METHOD_BUFFERED=0, FILE_ANY_ACCESS=0) = (9<<16)|(fn<<2)
     public const uint FSCTL_SET_EXTERNAL_BACKING = 0x0009030C;    // fn 195
-    public const uint FSCTL_GET_EXTERNAL_BACKING = 0x00090310;    // fn 196
     public const uint FSCTL_DELETE_EXTERNAL_BACKING = 0x00090314; // fn 197
     public const uint WOF_CURRENT_VERSION = 1;
     public const uint WOF_PROVIDER_FILE = 2;
     public const uint FILE_PROVIDER_CURRENT_VERSION = 1;
-    public const uint FILE_PROVIDER_COMPRESSION_XPRESS4K = 0;
     public const uint FILE_PROVIDER_COMPRESSION_LZX = 1;
 
     [StructLayout(LayoutKind.Sequential)]
@@ -166,7 +160,6 @@ internal static class Native
 
     // ---- Priority ----
     public const int THREAD_MODE_BACKGROUND_BEGIN = 0x00010000;
-    public const int THREAD_MODE_BACKGROUND_END = 0x00020000;
     public const int THREAD_PRIORITY_IDLE = -15;
 
     [DllImport("kernel32.dll", SetLastError = true)]

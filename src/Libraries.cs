@@ -3,117 +3,6 @@ using Microsoft.Win32;
 
 namespace SteamLZXTray;
 
-/// <summary>Minimal Valve KeyValues (VDF/ACF) parser.</summary>
-internal sealed class VdfNode
-{
-    public Dictionary<string, VdfNode> Children { get; } = new(StringComparer.OrdinalIgnoreCase);
-    public List<KeyValuePair<string, VdfNode>> Ordered { get; } = new();
-    public string? Value { get; set; }
-
-    public string? Str(string key) => Children.TryGetValue(key, out var n) ? n.Value : null;
-    public VdfNode? Node(string key) => Children.TryGetValue(key, out var n) ? n : null;
-
-    public static VdfNode Parse(string text)
-    {
-        int i = 0;
-        var root = new VdfNode();
-        ParseInto(root, text, ref i);
-        return root;
-    }
-
-    private static void ParseInto(VdfNode parent, string t, ref int i)
-    {
-        while (true)
-        {
-            string? key = NextToken(t, ref i, out bool isOpen, out bool isClose);
-            if (key == null && !isOpen && !isClose) return; // EOF
-            if (isClose) return;
-            if (isOpen || key == null) continue; // malformed; skip
-            string? val = NextToken(t, ref i, out isOpen, out isClose);
-            var node = new VdfNode();
-            if (isOpen) ParseInto(node, t, ref i);
-            else if (isClose) { node.Value = ""; Add(parent, key, node); return; }
-            else node.Value = val ?? "";
-            Add(parent, key, node);
-        }
-    }
-
-    private static void Add(VdfNode parent, string key, VdfNode node)
-    {
-        parent.Children[key] = node;
-        parent.Ordered.Add(new(key, node));
-    }
-
-    private static string? NextToken(string t, ref int i, out bool open, out bool close)
-    {
-        open = close = false;
-        while (i < t.Length)
-        {
-            char c = t[i];
-            if (char.IsWhiteSpace(c)) { i++; continue; }
-            if (c == '/' && i + 1 < t.Length && t[i + 1] == '/') { while (i < t.Length && t[i] != '\n') i++; continue; }
-            if (c == '{') { i++; open = true; return null; }
-            if (c == '}') { i++; close = true; return null; }
-            if (c == '"')
-            {
-                i++;
-                var sb = new StringBuilder();
-                while (i < t.Length && t[i] != '"')
-                {
-                    if (t[i] == '\\' && i + 1 < t.Length)
-                    {
-                        char n = t[i + 1];
-                        sb.Append(n switch { 'n' => '\n', 't' => '\t', _ => n });
-                        i += 2;
-                    }
-                    else sb.Append(t[i++]);
-                }
-                i++; // closing quote
-                return sb.ToString();
-            }
-            // unquoted token
-            int s = i;
-            while (i < t.Length && !char.IsWhiteSpace(t[i]) && t[i] != '{' && t[i] != '}' && t[i] != '"') i++;
-            return t.Substring(s, i - s);
-        }
-        return null;
-    }
-}
-
-internal sealed class AcfInfo
-{
-    public string AppId = "", Name = "", InstallDir = "", BuildId = "", LastUpdated = "", SizeOnDisk = "";
-    public int StateFlags;
-    public string ManifestPath = "";
-
-    public static AcfInfo? Read(string path)
-    {
-        try
-        {
-            string text;
-            using (var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete))
-            using (var sr = new StreamReader(fs, Encoding.UTF8))
-                text = sr.ReadToEnd();
-            var root = VdfNode.Parse(text);
-            var app = root.Node("AppState");
-            if (app == null) return null;
-            var a = new AcfInfo
-            {
-                AppId = app.Str("appid") ?? "",
-                Name = app.Str("name") ?? "",
-                InstallDir = app.Str("installdir") ?? "",
-                BuildId = app.Str("buildid") ?? "",
-                LastUpdated = app.Str("LastUpdated") ?? "",
-                SizeOnDisk = app.Str("SizeOnDisk") ?? "",
-                ManifestPath = path,
-            };
-            int.TryParse(app.Str("StateFlags"), out a.StateFlags);
-            return string.IsNullOrEmpty(a.AppId) || string.IsNullOrEmpty(a.InstallDir) ? null : a;
-        }
-        catch { return null; }
-    }
-}
-
 internal enum LibraryKind { Steam, Custom }
 
 /// <summary>A unit of work: one Steam game folder or one top-level subfolder of a custom folder.</summary>
@@ -141,20 +30,23 @@ internal sealed class LibraryInfo
     public int CompletedCount;
 }
 
+/// <summary>Finds Steam libraries and custom folders, checks their volumes, and builds the ordered work units.</summary>
 internal static class LibraryDiscovery
 {
+    private const uint DRIVE_REMOTE = 4;
+
     public static string? FindSteamPath()
     {
         try
         {
             using var k = Registry.CurrentUser.OpenSubKey(@"Software\Valve\Steam");
-            if (k?.GetValue("SteamPath") is string p && Directory.Exists(p)) return System.IO.Path.GetFullPath(p);
+            if (k?.GetValue("SteamPath") is string p && Directory.Exists(p)) return Path.GetFullPath(p);
         }
         catch { }
         try
         {
             using var k = Registry.LocalMachine.OpenSubKey(@"SOFTWARE\WOW6432Node\Valve\Steam");
-            if (k?.GetValue("InstallPath") is string p && Directory.Exists(p)) return System.IO.Path.GetFullPath(p);
+            if (k?.GetValue("InstallPath") is string p && Directory.Exists(p)) return Path.GetFullPath(p);
         }
         catch { }
         return null;
@@ -169,7 +61,7 @@ internal static class LibraryDiscovery
         else
         {
             var paths = new List<string> { steam };
-            string vdf = System.IO.Path.Combine(steam, "steamapps", "libraryfolders.vdf");
+            string vdf = Path.Combine(steam, "steamapps", "libraryfolders.vdf");
             try
             {
                 if (File.Exists(vdf))
@@ -191,14 +83,14 @@ internal static class LibraryDiscovery
             foreach (var raw in paths)
             {
                 string p;
-                try { p = System.IO.Path.GetFullPath(raw).TrimEnd('\\'); } catch { continue; }
+                try { p = Path.GetFullPath(raw).TrimEnd('\\'); } catch { continue; }
                 if (!seen.Add(p)) continue;
                 var lib = new LibraryInfo
                 {
                     Kind = LibraryKind.Steam,
                     Path = p,
-                    SteamAppsDir = System.IO.Path.Combine(p, "steamapps"),
-                    WalkRoot = System.IO.Path.Combine(p, "steamapps", "common"),
+                    SteamAppsDir = Path.Combine(p, "steamapps"),
+                    WalkRoot = Path.Combine(p, "steamapps", "common"),
                 };
                 CheckVolume(lib, settings);
                 result.Add(lib);
@@ -208,7 +100,7 @@ internal static class LibraryDiscovery
         foreach (var raw in settings.CustomFolders)
         {
             string p;
-            try { p = System.IO.Path.GetFullPath(raw).TrimEnd('\\'); } catch { continue; }
+            try { p = Path.GetFullPath(raw).TrimEnd('\\'); } catch { continue; }
             if (!seen.Add(p)) continue;
             var lib = new LibraryInfo { Kind = LibraryKind.Custom, Path = p, WalkRoot = p };
             CheckVolume(lib, settings);
@@ -234,8 +126,7 @@ internal static class LibraryDiscovery
         if (!lib.FileSystem.Equals("NTFS", StringComparison.OrdinalIgnoreCase))
         { lib.Status = $"Unsupported FS ({lib.FileSystem}) - WOF needs NTFS"; return; }
         if ((flags & Native.FILE_FILE_COMPRESSION) == 0) { lib.Status = "Volume reports no compression support"; return; }
-        uint dt = Native.GetDriveTypeW(vol);
-        if (dt == 4) { lib.Status = "Network drive (not supported)"; return; }
+        if (Native.GetDriveTypeW(vol) == DRIVE_REMOTE) { lib.Status = "Network drive (not supported)"; return; }
         lib.Supported = true;
         lib.Status = "OK";
     }
@@ -257,7 +148,7 @@ internal static class LibraryDiscovery
                     .OrderBy(a => long.TryParse(a.AppId, out var n) ? n : long.MaxValue).ThenBy(a => a.AppId, StringComparer.Ordinal);
                 foreach (var a in acfs)
                 {
-                    string dir = System.IO.Path.Combine(lib.WalkRoot, a.InstallDir);
+                    string dir = Path.Combine(lib.WalkRoot, a.InstallDir);
                     if (!Directory.Exists(dir)) continue;
                     libUnits.Add(new WorkUnit
                     {
@@ -283,7 +174,7 @@ internal static class LibraryDiscovery
                         if ((attrs & FileAttributes.ReparsePoint) != 0) continue; // don't follow junctions/symlinks
                     }
                     catch { continue; }
-                    libUnits.Add(new WorkUnit { Key = s, DisplayName = System.IO.Path.GetFileName(s), Root = s, Library = lib });
+                    libUnits.Add(new WorkUnit { Key = s, DisplayName = Path.GetFileName(s), Root = s, Library = lib });
                 }
             }
             lib.UnitCount = libUnits.Count;
