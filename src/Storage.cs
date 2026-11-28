@@ -136,13 +136,20 @@ internal sealed class RunState
     public long RunFilesCompressed { get; set; }
     /// <summary>True if PassStartSnapshot was taken when this pass began (or when a legacy pass was restarted).</summary>
     public bool HasPassStartSnapshot { get; set; }
+    /// <summary>Set when a legacy pass is reset from scratch; this pass does not skip games via the game log.</summary>
+    public bool IgnoreGameLogForPass { get; set; }
     /// <summary>Every Steam game's ACF fingerprint at the start of the current pass. Reused on resume; never retaken mid-pass.</summary>
     public Dictionary<string, PassGameSnapshot> PassStartSnapshot { get; set; } = new(StringComparer.OrdinalIgnoreCase);
+    /// <summary>True if LastKnownSteamState has been seeded (empty is a valid baseline when you have no games).</summary>
+    public bool HasLastKnownSteamState { get; set; }
+    /// <summary>Last observed ACF fingerprint of every Steam game, persisted across restarts for startup and rescan compares.</summary>
+    public Dictionary<string, PassGameSnapshot> LastKnownSteamState { get; set; } = new(StringComparer.OrdinalIgnoreCase);
 
     public static RunState Load(Action<string>? log)
     {
         var s = AtomicJson.Load(AppPaths.State, () => new RunState(), log);
         s.PassStartSnapshot = new Dictionary<string, PassGameSnapshot>(s.PassStartSnapshot ?? new(), StringComparer.OrdinalIgnoreCase);
+        s.LastKnownSteamState = new Dictionary<string, PassGameSnapshot>(s.LastKnownSteamState ?? new(), StringComparer.OrdinalIgnoreCase);
         s.PendingTriggerKeys ??= new();
         s.TriggeredUnitKeys ??= new();
         return s;
@@ -150,7 +157,7 @@ internal sealed class RunState
     public void Save() => AtomicJson.Save(AppPaths.State, this);
 }
 
-/// <summary>Install-state fingerprint of one Steam game, captured at pass start for end-of-pass comparison.</summary>
+/// <summary>Install-state fingerprint of one Steam game (buildid, LastUpdated, SizeOnDisk, StateFlags).</summary>
 internal sealed class PassGameSnapshot
 {
     public string Name { get; set; } = "";

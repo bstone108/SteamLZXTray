@@ -31,6 +31,7 @@ internal sealed class Engine : IDisposable
     private List<LibraryInfo> _libraries = new();
     private readonly List<FileSystemWatcher> _watchers = new();
     private readonly HashSet<string> _debounce = new(StringComparer.OrdinalIgnoreCase);
+    private readonly object _scanLock = new();
     private readonly System.Threading.Timer _debounceTimer;
     private DateTime _lastStateSave = DateTime.MinValue;
 
@@ -51,7 +52,7 @@ internal sealed class Engine : IDisposable
         if (_state.ActiveRun != RunKind.None)
         {
             if (!_state.HasPassStartSnapshot)
-                Log.Write($"Pass in progress ({_state.ActiveRun}) found in state with no start snapshot; it will be started over with a fresh snapshot" +
+                Log.Write($"Pass in progress ({_state.ActiveRun}) found in state with no start snapshot; it will be reset from scratch with a fresh snapshot" +
                           (_state.PendingTriggerKeys.Count > 0 ? $"; {_state.PendingTriggerKeys.Count} Steam update(s) queued" : "") + ".");
             else
                 Log.Write($"Pass in progress ({_state.ActiveRun}) found in state; resuming immediately at '{_state.CurrentUnitKey}' after '{_state.LastCompletedRelPath}'" +
@@ -72,11 +73,21 @@ internal sealed class Engine : IDisposable
 
     public void ApplySettings(AppSettings s)
     {
-        lock (_lock) _settings = s;
+        bool watchOn;
+        lock (_lock)
+        {
+            bool was = _settings.WatchSteamUpdates;
+            _settings = s;
+            watchOn = s.WatchSteamUpdates && !was && _state.ActiveRun == RunKind.None;
+        }
         _monitor.TreatFullscreenAsGame = s.TreatFullscreenAsGame;
         s.Save();
         Log.Write("Settings saved.");
-        ThreadPool.QueueUserWorkItem(_ => RefreshLibraries());
+        ThreadPool.QueueUserWorkItem(_ =>
+        {
+            RefreshLibraries();
+            if (watchOn) ScanSteamManifests("Watch enabled");
+        });
         _wake.Set();
     }
 
@@ -154,6 +165,8 @@ internal sealed class Engine : IDisposable
             foreach (var w in _watchers) w.Dispose();
             _watchers.Clear();
             if (!enabled) return;
+            // Live watching stays off during a pass; a full ACF scan runs at the end before watchers come back on.
+            if (_state.ActiveRun != RunKind.None) return;
             foreach (var lib in libs.Where(l => l.Kind == LibraryKind.Steam && l.Supported && Directory.Exists(l.SteamAppsDir)))
             {
                 try
@@ -162,11 +175,12 @@ internal sealed class Engine : IDisposable
                     {
                         NotifyFilter = NotifyFilters.LastWrite | NotifyFilters.FileName | NotifyFilters.Size,
                         IncludeSubdirectories = false,
+                        InternalBufferSize = 64 * 1024,
                     };
                     w.Changed += (_, e) => OnManifest(e.FullPath);
                     w.Created += (_, e) => OnManifest(e.FullPath);
                     w.Renamed += (_, e) => OnManifest(e.FullPath);
-                    w.Error += (_, e) => Log.Write("Manifest watcher error: " + e.GetException().Message);
+                    w.Error += (_, e) => OnWatcherError(e.GetException());
                     w.EnableRaisingEvents = true;
                     _watchers.Add(w);
                 }
@@ -183,6 +197,29 @@ internal sealed class Engine : IDisposable
         _debounceTimer.Change(TimeSpan.FromSeconds(30), Timeout.InfiniteTimeSpan);
     }
 
+    private void OnWatcherError(Exception ex)
+    {
+        Log.Write("Manifest watcher error: " + ex.Message);
+        if (!Settings.WatchSteamUpdates) return;
+        if (_state.ActiveRun != RunKind.None)
+        {
+            Log.Write("Watcher error during a pass; the end-of-pass full ACF scan will catch any missed updates.");
+            return;
+        }
+        ThreadPool.QueueUserWorkItem(_ => ScanSteamManifests("Watcher error"));
+    }
+
+    private void StopWatchers()
+    {
+        lock (_watchers)
+        {
+            if (_watchers.Count == 0) return;
+            foreach (var w in _watchers) w.Dispose();
+            _watchers.Clear();
+            Log.Write("Steam update watchers paused until this pass ends.");
+        }
+    }
+
     private void ProcessDebouncedManifests()
     {
         string[] paths;
@@ -191,21 +228,35 @@ internal sealed class Engine : IDisposable
         foreach (var p in paths)
         {
             var acf = AcfInfo.Read(p);
-            if (acf == null || acf.StateFlags != 4) continue; // still updating; a later write will trigger again
+            if (acf == null) continue;
             string libPath = Path.GetFullPath(Path.Combine(Path.GetDirectoryName(p)!, "..")).TrimEnd('\\');
             string key = LibraryDiscovery.SteamKey(libPath, acf.AppId);
+            var now = PassGameSnapshot.FromAcf(acf);
+            bool add = false;
             lock (_lock)
             {
-                // During a pass, games that existed at pass start are left for the end-of-pass snapshot compare.
-                if (_state.ActiveRun != RunKind.None && _state.HasPassStartSnapshot && _state.PassStartSnapshot.ContainsKey(key))
-                    continue;
-                if (_gameLog.Steam.TryGetValue(key, out var e) && e.BuildId == acf.BuildId) continue;
-                if (_state.PendingTriggerKeys.Contains(key, StringComparer.OrdinalIgnoreCase)) continue;
+                // Leftover events after a pass starts are left for the end-of-pass full scan.
+                if (_state.ActiveRun != RunKind.None) continue;
+                bool knownSame = _state.HasLastKnownSteamState
+                    && _state.LastKnownSteamState.TryGetValue(key, out var prev) && prev.SameAs(now);
+                if (_state.HasLastKnownSteamState)
+                    _state.LastKnownSteamState[key] = now;
+                if (acf.StateFlags != 4) { _state.Save(); continue; } // still updating; a later write will trigger again
+                if (knownSame) { _state.Save(); continue; }
+                // No last-known baseline yet: fall back to the game-log buildid (legacy watcher behavior).
+                if (!_state.HasLastKnownSteamState
+                    && _gameLog.Steam.TryGetValue(key, out var e) && e.BuildId == acf.BuildId)
+                { _state.Save(); continue; }
+                if (_state.PendingTriggerKeys.Contains(key, StringComparer.OrdinalIgnoreCase)) { _state.Save(); continue; }
                 _state.PendingTriggerKeys.Add(key);
                 _state.Save();
+                add = true;
             }
-            Log.Write($"Steam update detected: {acf.Name} (build {acf.BuildId}) queued.");
-            queued = true;
+            if (add)
+            {
+                Log.Write($"Steam update detected: {acf.Name} (build {acf.BuildId}) queued.");
+                queued = true;
+            }
         }
         if (queued) _wake.Set();
     }
@@ -233,6 +284,10 @@ internal sealed class Engine : IDisposable
     {
         ApplyLowPriority();
         Thread.Sleep(3000); // let library discovery + sampler warm up
+        if (_state.ActiveRun == RunKind.None)
+            ScanSteamManifests("Startup");
+        else
+            Log.Write("Startup ACF scan skipped (a pass is already in progress; the pass snapshot and end-of-pass full scan will cover updates).");
         while (!_stop)
         {
             try
@@ -276,6 +331,7 @@ internal sealed class Engine : IDisposable
             _state.RunBytesSaved = 0; _state.RunFilesProcessed = 0; _state.RunFilesCompressed = 0;
             _state.PassStartSnapshot = snapshot;
             _state.HasPassStartSnapshot = true;
+            _state.IgnoreGameLogForPass = false;
             if (kind == RunKind.Scheduled) _state.LastScheduledRunUtc = DateTime.UtcNow;
             _state.Save();
         }
@@ -339,6 +395,8 @@ internal sealed class Engine : IDisposable
         if (!_state.HasPassStartSnapshot)
             RestartPassWithoutSnapshot();
 
+        StopWatchers();
+
         var settings = Settings;
         var libs = LibraryDiscovery.Discover(settings);
         var units = LibraryDiscovery.BuildUnits(libs);
@@ -376,7 +434,7 @@ internal sealed class Engine : IDisposable
 
             // Triggered runs walk every queued game, even if the buildid in the game log already matches
             // (a verify/repair can rewrite files uncompressed without changing buildid).
-            if (kind == RunKind.Scheduled && !resuming && IsUnitCompleteVerified(u))
+            if (kind == RunKind.Scheduled && !_state.IgnoreGameLogForPass && !resuming && IsUnitCompleteVerified(u))
                 continue;
 
             lock (_lock)
@@ -406,6 +464,7 @@ internal sealed class Engine : IDisposable
             _state.TriggeredUnitKeys.Clear();
             _state.PassStartSnapshot.Clear();
             _state.HasPassStartSnapshot = false;
+            _state.IgnoreGameLogForPass = false;
             _state.LastRunCompletedUtc = DateTime.UtcNow;
             _state.Save();
             _curLib = _curGame = _curFile = ""; _curVolume = "";
@@ -415,12 +474,16 @@ internal sealed class Engine : IDisposable
     }
 
     /// <summary>
-    /// A resumed pass from an older build (or any state without a start snapshot) is started over once,
-    /// with a fresh snapshot. Already-compressed files are skipped quickly.
+    /// A resumed pass from an older build (or any state without a start snapshot) is fully reset once:
+    /// skip list and this-pass counters/progress are cleared, a fresh snapshot is taken, and every
+    /// game is walked again. The game log and all-time totals are kept; the game log is not used
+    /// to skip games on this pass. Already-compressed files are still skipped quickly at the file level.
+    /// The saved snapshot prevents this reset from running again after a later restart.
     /// </summary>
     private void RestartPassWithoutSnapshot()
     {
-        Log.Write("Resuming a pass with no saved start snapshot; starting the pass over and taking a fresh snapshot.");
+        Log.Write("Resuming a pass with no saved start snapshot; resetting this pass from scratch (skip list cleared, this-pass progress cleared, game log kept but not used to skip games) and taking a fresh snapshot.");
+        _skip.Clear();
         var snapshot = CaptureSteamSnapshot(Settings);
         lock (_lock)
         {
@@ -433,52 +496,146 @@ internal sealed class Engine : IDisposable
             _state.RunStartedUtc = DateTime.UtcNow;
             _state.PassStartSnapshot = snapshot;
             _state.HasPassStartSnapshot = true;
+            _state.IgnoreGameLogForPass = true;
             _state.Save();
         }
         Log.Write($"Pass snapshot: {snapshot.Count} game(s).");
     }
 
     /// <summary>
-    /// After a finished pass, compare current ACF state to the pass-start snapshot and queue
-    /// games that changed or were installed mid-pass. Still-updating games (StateFlags != 4)
-    /// are left for the live watcher to pick up when they finish.
+    /// After a finished pass, full scan of every ACF before live watching is turned back on.
+    /// Compares against the pass-start snapshot and last known state, and queues any fully
+    /// installed game that changed or is new. Still-updating games (StateFlags != 4) are
+    /// left for the live watcher to pick up when they finish.
     /// </summary>
     private void QueueSnapshotChanges()
     {
-        if (!_state.HasPassStartSnapshot) return;
+        var current = CaptureSteamSnapshot(Settings);
+        Dictionary<string, PassGameSnapshot>? start = null;
+        Dictionary<string, PassGameSnapshot>? known = null;
+        bool knownSeeded;
+        lock (_lock)
+        {
+            if (_state.HasPassStartSnapshot)
+                start = new Dictionary<string, PassGameSnapshot>(_state.PassStartSnapshot, StringComparer.OrdinalIgnoreCase);
+            knownSeeded = _state.HasLastKnownSteamState;
+            if (knownSeeded)
+                known = new Dictionary<string, PassGameSnapshot>(_state.LastKnownSteamState, StringComparer.OrdinalIgnoreCase);
+        }
+
         if (!Settings.WatchSteamUpdates)
         {
-            Log.Write("Pass snapshot compare skipped (Watch for Steam updates is off).");
+            Log.Write("End-of-pass ACF scan skipped (Watch for Steam updates is off).");
+            RememberSteamState(current);
             return;
         }
 
-        var current = CaptureSteamSnapshot(Settings);
-        Dictionary<string, PassGameSnapshot> start;
-        lock (_lock) start = new Dictionary<string, PassGameSnapshot>(_state.PassStartSnapshot, StringComparer.OrdinalIgnoreCase);
+        var queued = QueueChangedGames(current, start, known, knownSeeded, "End-of-pass scan");
+        RememberSteamState(current);
+        if (queued.Count > 0)
+            Log.Write($"End-of-pass ACF scan: {queued.Count} game(s) queued for another pass: {string.Join(", ", queued)}.");
+        else
+            Log.Write("End-of-pass ACF scan: no games changed or were added during the pass.");
+    }
 
+    /// <summary>
+    /// Full ACF scan against last known state (startup, watcher buffer overflow, or watching turned on).
+    /// Skipped when a pass is in progress — the end-of-pass scan covers that.
+    /// First run with no baseline records current state without queueing every game.
+    /// </summary>
+    private void ScanSteamManifests(string reason)
+    {
+        lock (_scanLock)
+        {
+            if (!Settings.WatchSteamUpdates)
+            {
+                Log.Write($"{reason} ACF scan skipped (Watch for Steam updates is off).");
+                return;
+            }
+            if (_state.ActiveRun != RunKind.None)
+            {
+                Log.Write($"{reason} ACF scan skipped (a pass is in progress; the end-of-pass full scan will cover updates).");
+                return;
+            }
+
+            var current = CaptureSteamSnapshot(Settings);
+            bool seeded;
+            Dictionary<string, PassGameSnapshot> known;
+            lock (_lock)
+            {
+                if (_state.ActiveRun != RunKind.None)
+                {
+                    Log.Write($"{reason} ACF scan skipped (a pass is in progress; the end-of-pass full scan will cover updates).");
+                    return;
+                }
+                seeded = _state.HasLastKnownSteamState;
+                known = new Dictionary<string, PassGameSnapshot>(_state.LastKnownSteamState, StringComparer.OrdinalIgnoreCase);
+            }
+
+            if (!seeded)
+            {
+                RememberSteamState(current);
+                Log.Write($"{reason} ACF scan: recorded {current.Count} game(s) as last known state (no prior baseline).");
+                return;
+            }
+
+            var queued = QueueChangedGames(current, passSnapshot: null, known, lastKnownSeeded: true, reason + " scan");
+            RememberSteamState(current);
+            if (queued.Count > 0)
+            {
+                Log.Write($"{reason} ACF scan: {queued.Count} game(s) queued: {string.Join(", ", queued)}.");
+                _wake.Set();
+            }
+            else
+                Log.Write($"{reason} ACF scan: {current.Count} game(s) checked, none changed.");
+        }
+    }
+
+    private List<string> QueueChangedGames(
+        Dictionary<string, PassGameSnapshot> current,
+        Dictionary<string, PassGameSnapshot>? passSnapshot,
+        Dictionary<string, PassGameSnapshot>? lastKnown,
+        bool lastKnownSeeded,
+        string logPrefix)
+    {
         var queued = new List<string>();
         foreach (var (key, now) in current)
         {
             if (now.StateFlags != 4) continue; // still updating; the watcher will queue when it finishes
-            if (start.TryGetValue(key, out var then) && then.SameAs(now)) continue;
+            string? why = null;
+            if (passSnapshot != null)
+            {
+                if (!passSnapshot.TryGetValue(key, out var snap)) why = "installed during the pass";
+                else if (!snap.SameAs(now)) why = "changed during the pass";
+            }
+            if (why == null && lastKnownSeeded && lastKnown != null)
+            {
+                if (!lastKnown.TryGetValue(key, out var prev)) why = "new";
+                else if (!prev.SameAs(now)) why = "changed since last known state";
+            }
+            if (why == null) continue;
             lock (_lock)
             {
                 if (_state.PendingTriggerKeys.Contains(key, StringComparer.OrdinalIgnoreCase)) continue;
                 _state.PendingTriggerKeys.Add(key);
             }
-            string why = start.ContainsKey(key) ? "changed during the pass" : "installed during the pass";
             string label = string.IsNullOrEmpty(now.Name) ? key : now.Name;
-            Log.Write($"Pass snapshot: {label} (build {now.BuildId}) {why}; queued.");
+            Log.Write($"{logPrefix}: {label} (build {now.BuildId}) {why}; queued.");
             queued.Add(label);
         }
-
         if (queued.Count > 0)
-        {
             lock (_lock) _state.Save();
-            Log.Write($"Pass snapshot compare: {queued.Count} game(s) queued for another pass: {string.Join(", ", queued)}.");
+        return queued;
+    }
+
+    private void RememberSteamState(Dictionary<string, PassGameSnapshot> current)
+    {
+        lock (_lock)
+        {
+            _state.LastKnownSteamState = new Dictionary<string, PassGameSnapshot>(current, StringComparer.OrdinalIgnoreCase);
+            _state.HasLastKnownSteamState = true;
+            _state.Save();
         }
-        else
-            Log.Write("Pass snapshot compare: no games changed during the pass.");
     }
 
     // ------------------------------------------------------------------ completion tracking
